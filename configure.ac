@@ -1,5 +1,5 @@
 AC_PREREQ([2.61])
-AC_INIT([libjwt], [1.12.1], [https://github.com/benmcollins/libjwt/issues])
+AC_INIT([libjwt], [1.13.0], [https://github.com/benmcollins/libjwt/issues])
 AM_INIT_AUTOMAKE([foreign])
 LT_PREREQ([2.2])
 LT_INIT([])
@@ -19,6 +19,13 @@ AS_IF([test "x$with_openssl" != "xno"], [
 	PKG_CHECK_MODULES([GNUTLS], [gnutls >= 3.5.8])
 	AM_CONDITIONAL([HAVE_OPENSSL], [false])
 ])
+
+AC_ARG_WITH([examples],
+	AS_HELP_STRING([--without-examples], [do not build example programs]),
+	[],
+	[with_examples=yes])
+
+AM_CONDITIONAL([BUILD_EXAMPLES], [test "x$with_examples" != "xno"])
 
 PKG_CHECK_MODULES([JANSSON], [jansson >= 2.0])
 PKG_CHECK_MODULES([CHECK], [check >= 0.9.4], [true], [true])
