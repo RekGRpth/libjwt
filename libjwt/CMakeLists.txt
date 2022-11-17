@@ -1,8 +1,11 @@
+include(FetchContent)
+
 set (TARGET_NAME ${PROJECT_NAME})
 
 option (BUILD_SHARED_LIBS "Build libjwt as shared library instead as static one." OFF)
 option (WITHOUT_OPENSSL "Use GnuTLS for encryption instead of OpenSSL" OFF)
 option (USE_WINSSL "Use Windows crypto API for encryption instead of OpenSSL" OFF)
+option (USE_INSTALLED_JANSSON "Use pre-installed jansson library" ON)
 
 if (UNIX)
 	option (ENABLE_PIC "Use position independent code in static library build." OFF)
@@ -43,7 +46,17 @@ else ()
 	set (SSL_LIBRARIES_OPTIMIZED ${OPENSSL_LIBRARIES})
 endif ()
 
-find_package (Jansson REQUIRED)
+if (USE_INSTALLED_JANSSON)
+    find_package (jansson REQUIRED)
+else()
+    FetchContent_Declare(
+    jansson
+    GIT_REPOSITORY https://github.com/akheron/jansson.git
+    GIT_TAG        v2.14
+    )
+
+    FetchContent_MakeAvailable(jansson)
+endif()
 
 write_file(${CMAKE_CURRENT_BINARY_DIR}/config.h "")
 
@@ -54,9 +67,15 @@ add_library (${TARGET_NAME} ${LIBRARY_TYPE} ${SOURCE_FILES})
 
 target_include_directories (${TARGET_NAME} PRIVATE
 	${SSL_LIBRARY_INCLUDE_DIR}
-	${JANSSON_INCLUDE_DIRS}
-	${CMAKE_CURRENT_BINARY_DIR}
+       ${jansson_SOURCE_DIR}/src
+       ${jansson_SOURCE_DIR}/android
+       ${CMAKE_CURRENT_BINARY_DIR}
 	)
+
+# Need for using the project by add_subdirectory
+target_include_directories (${TARGET_NAME} INTERFACE
+  ${CMAKE_CURRENT_LIST_DIR}/../include
+  )
 
 if (UNIX)
 	target_compile_definitions (${TARGET_NAME} PUBLIC _GNU_SOURCE)
@@ -82,7 +101,7 @@ endif ()
 
 target_link_libraries (${TARGET_NAME}
 	debug ${SSL_LIBRARIES_DEBUG} optimized ${SSL_LIBRARIES_OPTIMIZED}
-	${JANSSON_LIBRARIES}
+	jansson
 	)
 
 install (TARGETS ${TARGET_NAME}
