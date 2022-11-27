@@ -353,19 +353,6 @@ JWT_EXPORT int jwt_add_grants_json(jwt_t *jwt, const char *json);
  */
 JWT_EXPORT int jwt_del_grants(jwt_t *jwt, const char *grant);
 
-/**
- * @deprecated
- * Delete a grant from this JWT object.
- *
- * Deletes the named grant from this object. It is not an error if there
- * is no grant matching the passed name.
- *
- * @param jwt Pointer to a JWT object.
- * @param grant String containing the name of the grant to delete.
- * @return Returns 0 on success, valid errno otherwise.
- */
-DEPRECATED(JWT_EXPORT int jwt_del_grant(jwt_t *jwt, const char *grant));
-
 /** @} */
 
 /**
@@ -758,8 +745,8 @@ JWT_EXPORT unsigned int jwt_validate(jwt_t *jwt, jwt_valid_t *jwt_valid);
  *
  * @param jwt_valid Pointer to a JWT validation object pointer. Will be allocated
  *     on success.
+ * @param alg A valid jwt_alg_t specifier.
  * @return 0 on success, valid errno otherwise.
- *
  */
 JWT_EXPORT int jwt_valid_new(jwt_valid_t **jwt_valid, jwt_alg_t alg);
 
@@ -926,7 +913,7 @@ JWT_EXPORT char* jwt_valid_get_grants_json(jwt_valid_t *jwt_valid, const char *g
  *    is NULL, then all grants are deleted.
  * @return Returns 0 on success, valid errno otherwise.
  */
-JWT_EXPORT int jwt_valid_del_grants(jwt_valid_t *jwt, const char *grant);
+JWT_EXPORT int jwt_valid_del_grants(jwt_valid_t *jwt_valid, const char *grant);
 
 /**
  * Set the time for which expires and not-before claims should be evaluated.
