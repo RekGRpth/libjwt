@@ -169,27 +169,35 @@ int jwt_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 	size_t slen, padding = 0;
 
 	switch (jwt->alg) {
-	/* RSA and PS */
+	/* RSA */
 	case JWT_ALG_RS256:
-	case JWT_ALG_PS256:
 		alg = EVP_sha256();
 		type = EVP_PKEY_RSA;
-		if (jwt->alg == JWT_ALG_PS256)
-			padding = RSA_PKCS1_PSS_PADDING;
 		break;
 	case JWT_ALG_RS384:
-	case JWT_ALG_PS384:
 		alg = EVP_sha384();
 		type = EVP_PKEY_RSA;
-		if (jwt->alg == JWT_ALG_PS384)
-			padding = RSA_PKCS1_PSS_PADDING;
 		break;
 	case JWT_ALG_RS512:
-	case JWT_ALG_PS512:
 		alg = EVP_sha512();
 		type = EVP_PKEY_RSA;
-		if (jwt->alg == JWT_ALG_PS512)
-			padding = RSA_PKCS1_PSS_PADDING;
+		break;
+
+	/* RSA-PSS */
+	case JWT_ALG_PS256:
+		alg = EVP_sha256();
+		type = EVP_PKEY_RSA_PSS;
+		padding = RSA_PKCS1_PSS_PADDING;
+		break;
+	case JWT_ALG_PS384:
+		alg = EVP_sha384();
+		type = EVP_PKEY_RSA_PSS;
+		padding = RSA_PKCS1_PSS_PADDING;
+		break;
+	case JWT_ALG_PS512:
+		alg = EVP_sha512();
+		type = EVP_PKEY_RSA_PSS;
+		padding = RSA_PKCS1_PSS_PADDING;
 		break;
 
 	/* ECC */
@@ -233,7 +241,7 @@ int jwt_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 	if (EVP_DigestSignInit(mdctx, &pkey_ctx, alg, NULL, pkey) != 1)
 		SIGN_ERROR(EINVAL);
 
-	if (padding > 0 && (0 < EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, padding)))
+	if (padding > 0 && (0 > EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, padding)))
 		SIGN_ERROR(EINVAL);
 
 	/* Call update with the message */
@@ -340,25 +348,33 @@ int jwt_verify_sha_pem(jwt_t *jwt, const char *head, unsigned int head_len, cons
 	switch (jwt->alg) {
 	/* RSA */
 	case JWT_ALG_RS256:
-	case JWT_ALG_PS256:
 		alg = EVP_sha256();
 		type = EVP_PKEY_RSA;
-		if (jwt->alg == JWT_ALG_PS256)
-			padding = RSA_PKCS1_PSS_PADDING;
 		break;
 	case JWT_ALG_RS384:
-	case JWT_ALG_PS384:
 		alg = EVP_sha384();
 		type = EVP_PKEY_RSA;
-		if (jwt->alg == JWT_ALG_PS384)
-			padding = RSA_PKCS1_PSS_PADDING;
 		break;
 	case JWT_ALG_RS512:
-	case JWT_ALG_PS512:
 		alg = EVP_sha512();
 		type = EVP_PKEY_RSA;
-		if (jwt->alg == JWT_ALG_PS512)
-			padding = RSA_PKCS1_PSS_PADDING;
+		break;
+
+        /* RSA-PSS */
+        case JWT_ALG_PS256:
+		alg = EVP_sha256();
+		type = EVP_PKEY_RSA_PSS;
+		padding = RSA_PKCS1_PSS_PADDING;
+		break;
+	case JWT_ALG_PS384:
+		alg = EVP_sha384();
+		type = EVP_PKEY_RSA_PSS;
+		padding = RSA_PKCS1_PSS_PADDING;
+		break;
+	case JWT_ALG_PS512:
+		alg = EVP_sha512();
+		type = EVP_PKEY_RSA_PSS;
+		padding = RSA_PKCS1_PSS_PADDING;
 		break;
 
 	/* ECC */
@@ -449,7 +465,7 @@ int jwt_verify_sha_pem(jwt_t *jwt, const char *head, unsigned int head_len, cons
 	if (EVP_DigestVerifyInit(mdctx, &pkey_ctx, alg, NULL, pkey) != 1)
 		VERIFY_ERROR(EINVAL);
 
-	if (padding > 0 && (0 < EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, padding)))
+	if (padding > 0 && (0 > EVP_PKEY_CTX_set_rsa_padding(pkey_ctx, padding)))
 		VERIFY_ERROR(EINVAL);
 
 	/* Call update with the message */

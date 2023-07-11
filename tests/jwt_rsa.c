@@ -80,9 +80,9 @@ static const char jwt_rs512_8192[] = "eyJhbGciOiJSUzUxMiIsInR5cCI6IkpXVCJ9.ey"
 	"MDRrJehImeyDE0H0rpOsxSXOjnDqiFBsf9d0-zJNFvo9tWlK_-d-N40BIy5eZm37FKG7"
 	"g2rFmXtuicUs6jiwu0_tHSi1fPKO7YN2ezQc9HAoBvvrur1z_XGbDSmFTQNTv0Cg";
 
-static const char jwt_rs256_invalid[] = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.ey"
-	"JpYXQiOjE0NzU5ODA1NDUsImlzcyI6ImZpbGVzLmN5cGhyZS5jb20iLCJyZWYiOiJYWF"
-	"hYLVlZWVktWlpaWi1BQUFBLUNDQ0MiLCJzdWIiOiJ1c2VyMCJ9.IAmCornholio";
+static const char jwt_rs256_invalid[] = "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9"
+	".eyJpYXQiOjE0NzU5ODA1NDUsImlzcyI6ImZpbGVzLmN5cGhyZS5jb20iLCJyZWYiOiJ"
+	"YWFhYLVlZWVktWlpaWi1BQUFBLUNDQ0MiLCJzdWIiOiJ1c2VyMCJ9.IAmCornholio";
 
 static void read_key(const char *key_file)
 {
@@ -146,6 +146,7 @@ static void __test_alg_key(const char *key_file, const char *jwt_str,
 static void __verify_alg_key(const char *key_file, const char *jwt_str,
 			     const jwt_alg_t alg)
 {
+	jwt_valid_t *jwt_valid = NULL;
 	jwt_t *jwt = NULL;
 	int ret = 0;
 
@@ -155,10 +156,10 @@ static void __verify_alg_key(const char *key_file, const char *jwt_str,
 	ck_assert_int_eq(ret, 0);
 	ck_assert(jwt != NULL);
 
-	jwt_valid_t *jwt_valid = NULL;
 	jwt_valid_new(&jwt_valid, alg);
 
-	ck_assert_int_eq(JWT_VALIDATION_SUCCESS, jwt_validate(jwt, jwt_valid));
+	ret = jwt_validate(jwt, jwt_valid);
+	ck_assert_int_eq(JWT_VALIDATION_SUCCESS, ret);
 
 	jwt_valid_free(jwt_valid);
 	jwt_free(jwt);
