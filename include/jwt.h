@@ -1,6 +1,7 @@
-/* Copyright (C) 2015-2022 Ben Collins <bcollins@maclara-llc.com>
+/* Copyright (C) 2015-2023 Ben Collins <bcollins@maclara-llc.com>
    This file is part of the JWT C Library
 
+   SPDX-License-Identifier:  MPL-2.0
    This Source Code Form is subject to the terms of the Mozilla Public
    License, v. 2.0. If a copy of the MPL was not distributed with this
    file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -714,7 +715,7 @@ JWT_EXPORT void jwt_get_alloc(jwt_malloc_t *pmalloc, jwt_realloc_t *prealloc, jw
  /** @} */
 
 /**
- * @defgroup jwt_vaildate JWT validation functions
+ * @defgroup jwt_validate JWT validation functions
  * These functions allow you to define requirements for JWT validation.
  *
  * The most basic validation is that the JWT uses the expected algorithm.

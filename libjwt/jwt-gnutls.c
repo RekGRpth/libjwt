@@ -1,6 +1,7 @@
 /* Copyright (C) 2017 Nicolas Mora <mail@babelouest.org>
    This file is part of the JWT C Library
 
+   SPDX-License-Identifier:  MPL-2.0
    This Source Code Form is subject to the terms of the Mozilla Public
    License, v. 2.0. If a copy of the MPL was not distributed with this
    file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -31,7 +32,7 @@ extern int _gnutls_decode_ber_rs_raw(const gnutls_datum_t *sig_value,
 
 static int gnutls_encode_rs_value(gnutls_datum_t *sig_value,
 				  const gnutls_datum_t *r,
-				  const gnutls_datum_t * s)
+				  const gnutls_datum_t *s)
 {
 	return _gnutls_encode_ber_rs_raw(sig_value, r, s);
 }
@@ -119,7 +120,7 @@ int jwt_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len, const char *str,
 	int ret = 0, pk_alg;
 	int alg, adj;
 
-	/* Initialiaze for checking later. */
+	/* Initialize for checking later. */
 	*out = NULL;
 
 	switch (jwt->alg) {
@@ -138,7 +139,7 @@ int jwt_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len, const char *str,
 		break;
 
 	/* RSA-PSS */
-        case JWT_ALG_PS256:
+	case JWT_ALG_PS256:
 		alg = GNUTLS_DIG_SHA256;
 		pk_alg = GNUTLS_PK_RSA_PSS;
 		break;
