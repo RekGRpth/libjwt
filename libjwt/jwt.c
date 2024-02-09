@@ -1,4 +1,4 @@
-/* Copyright (C) 2015-2023 Ben Collins <bcollins@maclara-llc.com>
+/* Copyright (C) 2015-2024 Ben Collins <bcollins@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -63,6 +63,35 @@ static char *jwt_strdup(const char *str)
 	return result;
 }
 
+/* A time-safe strcmp function */
+int jwt_strcmp(const char *str1, const char *str2)
+{
+	/* Get the LONGEST length */
+	int len1 = strlen(str1);
+	int len2 = strlen(str2);
+	int len_max = len1 >= len2 ? len1 : len2;
+
+	int i, ret = 0;
+
+	/* Iterate the entire longest string no matter what. Only testing
+	 * the shortest string would still allow attacks for
+	 * "a" == "aKJSDHkjashaaHJASJ", adding a character each time one
+	 * is found. */
+	for (i = 0; i < len_max; i++) {
+		char c1, c2;
+
+		c1 = (i < len1) ? str1[i] : 0;
+		c2 = (i < len2) ? str2[i] : 0;
+
+		ret |= c1 ^ c2;
+	}
+
+	/* Don't forget to check length */
+	ret |= len1 ^ len2;
+
+	return ret;
+}
+
 static void *jwt_calloc(size_t nmemb, size_t size)
 {
 	size_t total_size;
@@ -102,12 +131,14 @@ const char *jwt_alg_str(jwt_alg_t alg)
 		return "ES384";
 	case JWT_ALG_ES512:
 		return "ES512";
+#ifndef HAVE_OPENSSL
 	case JWT_ALG_PS256:
 		return "PS256";
 	case JWT_ALG_PS384:
 		return "PS384";
 	case JWT_ALG_PS512:
 		return "PS512";
+#endif
 	default:
 		return NULL;
 	}
@@ -138,12 +169,14 @@ jwt_alg_t jwt_str_alg(const char *alg)
 		return JWT_ALG_ES384;
 	else if (!strcmp(alg, "ES512"))
 		return JWT_ALG_ES512;
+#ifndef HAVE_OPENSSL
 	else if (!strcmp(alg, "PS256"))
 		return JWT_ALG_PS256;
 	else if (!strcmp(alg, "PS384"))
 		return JWT_ALG_PS384;
 	else if (!strcmp(alg, "PS512"))
 		return JWT_ALG_PS512;
+#endif
 
 	return JWT_ALG_INVAL;
 }
@@ -444,10 +477,12 @@ static int jwt_sign(jwt_t *jwt, char **out, unsigned int *len, const char *str, 
 	case JWT_ALG_RS384:
 	case JWT_ALG_RS512:
 
+#ifndef HAVE_OPENSSL
 	/* PS */
 	case JWT_ALG_PS256:
 	case JWT_ALG_PS384:
 	case JWT_ALG_PS512:
+#endif
 
 	/* ECC */
 	case JWT_ALG_ES256:
@@ -475,10 +510,12 @@ static int jwt_verify(jwt_t *jwt, const char *head, unsigned int head_len, const
 	case JWT_ALG_RS384:
 	case JWT_ALG_RS512:
 
+#ifndef HAVE_OPENSSL
 	/* PS */
 	case JWT_ALG_PS256:
 	case JWT_ALG_PS384:
 	case JWT_ALG_PS512:
+#endif
 
 	/* ECC */
 	case JWT_ALG_ES256:
