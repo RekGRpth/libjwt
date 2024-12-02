@@ -127,6 +127,8 @@ const char *jwt_alg_str(jwt_alg_t alg)
 		return "RS512";
 	case JWT_ALG_ES256:
 		return "ES256";
+	case JWT_ALG_ES256K:
+		return "ES256K";
 	case JWT_ALG_ES384:
 		return "ES384";
 	case JWT_ALG_ES512:
@@ -163,6 +165,8 @@ jwt_alg_t jwt_str_alg(const char *alg)
 		return JWT_ALG_RS512;
 	else if (!strcmp(alg, "ES256"))
 		return JWT_ALG_ES256;
+	else if (!strcmp(alg, "ES256K"))
+		return JWT_ALG_ES256K;
 	else if (!strcmp(alg, "ES384"))
 		return JWT_ALG_ES384;
 	else if (!strcmp(alg, "ES512"))
@@ -478,16 +482,14 @@ static int jwt_sign(jwt_t *jwt, char **out, unsigned int *len, const char *str, 
 	case JWT_ALG_RS384:
 	case JWT_ALG_RS512:
 
-#ifndef HAVE_OPENSSL
-	/* XXX These do not work right now on OpenSSL */
 	/* RSA-PSS */
 	case JWT_ALG_PS256:
 	case JWT_ALG_PS384:
 	case JWT_ALG_PS512:
-#endif
 
 	/* ECC */
 	case JWT_ALG_ES256:
+	case JWT_ALG_ES256K:
 	case JWT_ALG_ES384:
 	case JWT_ALG_ES512:
 		return jwt_sign_sha_pem(jwt, out, len, str, str_len);
@@ -512,16 +514,14 @@ static int jwt_verify(jwt_t *jwt, const char *head, unsigned int head_len, const
 	case JWT_ALG_RS384:
 	case JWT_ALG_RS512:
 
-#ifndef HAVE_OPENSSL
-	/* XXX These do not work right now on OpenSSL */
 	/* RSA-PSS */
 	case JWT_ALG_PS256:
 	case JWT_ALG_PS384:
 	case JWT_ALG_PS512:
-#endif
 
 	/* ECC */
 	case JWT_ALG_ES256:
+	case JWT_ALG_ES256K:
 	case JWT_ALG_ES384:
 	case JWT_ALG_ES512:
 		return jwt_verify_sha_pem(jwt, head, head_len, sig);
