@@ -152,58 +152,58 @@ jwt_verify_hmac_done:
 	return ret;
 }
 
-#define SIGN_ERROR(__err) { ret = __err; goto jwt_sign_sha_pem_done; }
+#define EC_ERROR(__err) { return -(__err); }
 
-static int jwt_degree_for_key(EVP_PKEY *pkey, jwt_t *jwt)
+static size_t __degree_and_check(EVP_PKEY *pkey, jwt_t *jwt)
 {
-	int degree = 0;
-	char groupNameBuffer[24] = {0};
-	size_t groupNameBufferLen = 0;
+	size_t degree;
+	int curve_nid;
 
-	if (!EVP_PKEY_get_group_name(pkey, groupNameBuffer, sizeof(groupNameBuffer), &groupNameBufferLen))
-		return -EINVAL;
+#if OPENSSL_VERSION_NUMBER < 0x30000000L
+	const EC_GROUP *group;
+	const EC_KEY *ec_key;
 
-	groupNameBuffer[groupNameBufferLen] = '\0';
+	ec_key = EVP_PKEY_get0_EC_KEY(pkey);
+	if (ec_key == NULL)
+		EC_ERROR(EINVAL);
+
+	group = EC_KEY_get0_group(ec_key);
+	if (group == NULL)
+		EC_ERROR(EINVAL);
+
+	curve_nid = EC_GROUP_get_curve_name(group);
+	degree = EC_GROUP_get_degree(group);
+#else
+	EC_GROUP *group;
+	char curve_name[80];
+	size_t len;
+
+	if (!EVP_PKEY_get_group_name(pkey, curve_name, sizeof(curve_name), &len))
+		EC_ERROR(EINVAL);
+	curve_name[len] = '\0';
+
+	curve_nid = OBJ_txt2nid(curve_name);
+	if (curve_nid == NID_undef)
+		EC_ERROR(EINVAL);
+	group = EC_GROUP_new_by_curve_name(curve_nid);
+	if (group == NULL)
+		EC_ERROR(EINVAL);
+
+	degree = EC_GROUP_get_degree(group);
+	EC_GROUP_free(group);
+#endif
 
 	/* We only perform this check for ES256K. All others we just check
 	 * the degree (bits). */
-	if (jwt->alg == JWT_ALG_ES256K) {
-		if (strcmp(groupNameBuffer, "secp256k1"))
-			return -EINVAL;
-	}
+	if (jwt->alg == JWT_ALG_ES256K && curve_nid != NID_secp256k1)
+		EC_ERROR(EINVAL);
 
-#if OPENSSL_VERSION_NUMBER >= 0x30000000L
-	int curve_nid;
-	EC_GROUP *group;
-	/* OpenSSL 3.0.0 and later has a new API for this. */
+	return degree;
+}
 
-	curve_nid = OBJ_txt2nid(groupNameBuffer);
-	if (curve_nid == NID_undef)
-		return -EINVAL;
-
-	group = EC_GROUP_new_by_curve_name(curve_nid);
-	if (group == NULL)
-		return -ENOMEM;
-
-	/* Get the degree of the curve */
-	degree = EC_GROUP_get_degree(group);
-
-	EC_GROUP_free(group);
-#else
-	EC_KEY *ec_key;
-
-	if (EVP_PKEY_id(pkey) != EVP_PKEY_EC)
-		return -EINVAL;
-
-	/* Get the actual ec_key */
-	ec_key = EVP_PKEY_get1_EC_KEY(pkey);
-	if (ec_key == NULL)
-		return -ENOMEM;
-
-	degree = EC_GROUP_get_degree(EC_KEY_get0_group(ec_key));
-
-	EC_KEY_free(ec_key);
-#endif
+static int jwt_degree_for_key(EVP_PKEY *pkey, jwt_t *jwt)
+{
+	size_t degree = __degree_and_check(pkey, jwt);
 
 	/* Final check for matching degree */
 	switch (jwt->alg) {
@@ -227,6 +227,8 @@ static int jwt_degree_for_key(EVP_PKEY *pkey, jwt_t *jwt)
 
 	return degree;
 }
+
+#define SIGN_ERROR(__err) { ret = __err; goto jwt_sign_sha_pem_done; }
 
 int jwt_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 		     const char *str, unsigned int str_len)
@@ -328,15 +330,17 @@ int jwt_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 	}
 
 	/* Get the size of sig first */
-	EVP_DigestSign(mdctx, NULL, &slen, (const unsigned char *)str, str_len);
+	if (EVP_DigestSign(mdctx, NULL, &slen, (const unsigned char *)str, str_len) != 1)
+		SIGN_ERROR(EINVAL);
 
 	/* Allocate memory for signature based on returned size */
-        sig = alloca(slen);
+	sig = alloca(slen);
 	if (sig == NULL)
 		SIGN_ERROR(ENOMEM);
 
 	/* Actual signing */
-	EVP_DigestSign(mdctx, sig, &slen, (const unsigned char *)str, str_len);
+	if (EVP_DigestSign(mdctx, sig, &slen, (const unsigned char *)str, str_len) != 1)
+		SIGN_ERROR(EINVAL);
 
 	if (type != EVP_PKEY_EC) {
 		*out = jwt_malloc(slen);
