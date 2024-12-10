@@ -6,16 +6,14 @@
 #include <errno.h>
 #include <time.h>
 
-#include <check.h>
-
-#include <jwt.h>
-
 #include "jwt_tests.h"
 
 START_TEST(test_jwt_add_header)
 {
 	jwt_t *jwt = NULL;
 	int ret = 0;
+
+	SET_OPS();
 
 	ret = jwt_new(&jwt);
 	ck_assert_int_eq(ret, 0);
@@ -46,6 +44,8 @@ START_TEST(test_jwt_get_header)
 	const char testval[] = "testing";
 	int ret = 0;
 
+	SET_OPS();
+
 	ret = jwt_new(&jwt);
 	ck_assert_int_eq(ret, 0);
 	ck_assert_ptr_nonnull(jwt);
@@ -66,6 +66,8 @@ START_TEST(test_jwt_add_header_int)
 	jwt_t *jwt = NULL;
 	long val;
 	int ret = 0;
+
+	SET_OPS();
 
 	ret = jwt_new(&jwt);
 	ck_assert_int_eq(ret, 0);
@@ -89,6 +91,8 @@ START_TEST(test_jwt_add_header_bool)
 	jwt_t *jwt = NULL;
 	int val;
 	int ret = 0;
+
+	SET_OPS();
 
 	ret = jwt_new(&jwt);
 	ck_assert_int_eq(ret, 0);
@@ -119,6 +123,8 @@ START_TEST(test_jwt_del_headers)
 	const char *val;
 	const char testval[] = "testing";
 	int ret = 0;
+
+	SET_OPS();
 
 	ret = jwt_new(&jwt);
 	ck_assert_int_eq(ret, 0);
@@ -159,6 +165,8 @@ START_TEST(test_jwt_header_invalid)
 	int valbool = 0;
 	int ret = 0;
 
+	SET_OPS();
+
 	ret = jwt_new(&jwt);
 	ck_assert_int_eq(ret, 0);
 	ck_assert_ptr_nonnull(jwt);
@@ -196,6 +204,8 @@ START_TEST(test_jwt_headers_json)
 	char *json_val;
 	int ret = 0;
 
+	SET_OPS();
+
 	ret = jwt_new(&jwt);
 	ck_assert_int_eq(ret, 0);
 	ck_assert_ptr_nonnull(jwt);
@@ -231,18 +241,19 @@ static Suite *libjwt_suite(const char *title)
 {
 	Suite *s;
 	TCase *tc_core;
+	int i = ARRAY_SIZE(jwt_test_ops) - 1;
 
 	s = suite_create(title);
 
 	tc_core = tcase_create("jwt_header");
 
-	tcase_add_test(tc_core, test_jwt_add_header);
-	tcase_add_test(tc_core, test_jwt_add_header_int);
-	tcase_add_test(tc_core, test_jwt_add_header_bool);
-	tcase_add_test(tc_core, test_jwt_get_header);
-	tcase_add_test(tc_core, test_jwt_del_headers);
-	tcase_add_test(tc_core, test_jwt_header_invalid);
-	tcase_add_test(tc_core, test_jwt_headers_json);
+	tcase_add_loop_test(tc_core, test_jwt_add_header, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_add_header_int, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_add_header_bool, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_get_header, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_del_headers, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_header_invalid, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_headers_json, 0, i);
 
 	tcase_set_timeout(tc_core, 30);
 

@@ -6,16 +6,14 @@
 #include <errno.h>
 #include <time.h>
 
-#include <check.h>
-
-#include <jwt.h>
-
 #include "jwt_tests.h"
 
 START_TEST(test_jwt_new)
 {
 	jwt_t *jwt = NULL;
 	int ret = 0;
+
+	SET_OPS();
 
 	ret = jwt_new(NULL);
 	ck_assert_int_eq(ret, EINVAL);
@@ -35,6 +33,8 @@ START_TEST(test_jwt_dup)
 	const char *val = NULL;
 	time_t now;
 	long valint;
+
+	SET_OPS();
 
 	new = jwt_dup(NULL);
 	ck_assert_ptr_null(new);
@@ -74,6 +74,8 @@ START_TEST(test_jwt_dup_signed)
 	int ret = 0;
 	const char *val = NULL;
 
+	SET_OPS();
+
 	ret = jwt_new(&jwt);
 	ck_assert_int_eq(ret, 0);
 	ck_assert_ptr_nonnull(jwt);
@@ -106,6 +108,8 @@ START_TEST(test_jwt_decode)
 	jwt_t *jwt;
 	int ret;
 
+	SET_OPS();
+
 	ret = jwt_decode(&jwt, token, NULL, 0);
 	ck_assert_int_eq(ret, 0);
 	ck_assert_ptr_nonnull(jwt);
@@ -124,6 +128,8 @@ START_TEST(test_jwt_decode_2)
 	jwt_alg_t alg;
 	jwt_t *jwt;
 	int ret;
+
+	SET_OPS();
 
 	ret = jwt_decode_2(&jwt, token, NULL);
 	ck_assert_int_eq(ret, 0);
@@ -144,6 +150,8 @@ START_TEST(test_jwt_decode_invalid_final_dot)
 	jwt_t *jwt;
 	int ret;
 
+	SET_OPS();
+
 	ret = jwt_decode(&jwt, token, NULL, 0);
 	ck_assert_int_eq(ret, EINVAL);
 	ck_assert_ptr_null(jwt);
@@ -159,6 +167,8 @@ START_TEST(test_jwt_decode_invalid_alg)
 			     "3ViIjoidXNlcjAifQ.";
 	jwt_t *jwt;
 	int ret;
+
+	SET_OPS();
 
 	ret = jwt_decode(&jwt, token, NULL, 0);
 	ck_assert_int_eq(ret, EINVAL);
@@ -176,6 +186,8 @@ START_TEST(test_jwt_decode_ignore_typ)
 	jwt_t *jwt;
 	int ret;
 
+	SET_OPS();
+
 	ret = jwt_decode(&jwt, token, NULL, 0);
 	ck_assert_int_eq(ret, 0);
 	ck_assert(jwt);
@@ -191,6 +203,8 @@ START_TEST(test_jwt_decode_invalid_head)
 			     "3ViIjoidXNlcjAifQ.";
 	jwt_t *jwt;
 	int ret;
+
+	SET_OPS();
 
 	ret = jwt_decode(&jwt, token, NULL, 0);
 	ck_assert_int_eq(ret, EINVAL);
@@ -208,6 +222,8 @@ START_TEST(test_jwt_decode_alg_none_with_key)
 	jwt_t *jwt;
 	int ret;
 
+	SET_OPS();
+
 	ret = jwt_decode(&jwt, token, (const unsigned char *)"key", 3);
 	ck_assert_int_eq(ret, EINVAL);
 	ck_assert_ptr_null(jwt);
@@ -223,6 +239,8 @@ START_TEST(test_jwt_decode_invalid_body)
 			     "3ViIjoidXNlcjAifQ.";
 	jwt_t *jwt;
 	int ret;
+
+	SET_OPS();
 
 	ret = jwt_decode(&jwt, token, NULL, 0);
 	ck_assert_int_eq(ret, EINVAL);
@@ -240,6 +258,8 @@ START_TEST(test_jwt_decode_hs256)
 	unsigned char key256[32] = "012345678901234567890123456789XY";
 	jwt_t *jwt;
 	int ret;
+
+	SET_OPS();
 
 	ret = jwt_decode(&jwt, token, key256, sizeof(key256));
 	ck_assert_int_eq(ret, 0);
@@ -259,6 +279,8 @@ START_TEST(test_jwt_decode_hs256_no_key_alg)
 	int ret;
 	const char *alg_str;
 	jwt_alg_t alg;
+
+	SET_OPS();
 
 	ret = jwt_decode(&jwt, token, NULL, 0);
 	ck_assert_int_eq(ret, 0);
@@ -292,6 +314,8 @@ START_TEST(test_jwt_decode_hs256_issue_1)
 	jwt_t *jwt;
 	int ret;
 
+	SET_OPS();
+
 	ret = jwt_decode(&jwt, token, key256, sizeof(key256));
 	ck_assert_int_eq(ret, 0);
 	ck_assert_ptr_nonnull(jwt);
@@ -314,6 +338,8 @@ START_TEST(test_jwt_decode_hs256_issue_2)
 	jwt_t *jwt;
 	int ret;
 
+	SET_OPS();
+
 	ret = jwt_decode(&jwt, token, (const unsigned char *)key256, strlen(key256));
 	ck_assert_int_eq(ret, 0);
 	ck_assert_ptr_nonnull(jwt);
@@ -334,6 +360,8 @@ START_TEST(test_jwt_decode_hs384)
 	jwt_t *jwt;
 	int ret;
 
+	SET_OPS();
+
 	ret = jwt_decode(&jwt, token, key384, sizeof(key384));
 	ck_assert_int_eq(ret, 0);
 	ck_assert_ptr_nonnull(jwt);
@@ -352,6 +380,8 @@ START_TEST(test_jwt_decode_hs512)
 				   "012345678901234567890123456789XY";
 	jwt_t *jwt;
         int ret;
+
+	SET_OPS();
 
 	ret = jwt_decode(&jwt, token, key512, sizeof(key512));
 	ck_assert_int_eq(ret, 0);
@@ -384,6 +414,8 @@ START_TEST(test_jwt_decode_2_hs512)
 	jwt_t *jwt;
         int ret;
 
+	SET_OPS();
+
 	ret = jwt_decode_2(&jwt, token, &test_jwt_decode_2_hs512_kp);
 	ck_assert_int_eq(ret, 0);
 	ck_assert_ptr_nonnull(jwt);
@@ -403,6 +435,8 @@ START_TEST(test_jwt_decode_2_invalid)
 	jwt_t *jwt;
 	int ret;
 
+	SET_OPS();
+
 	ret = jwt_decode_2(&jwt, token, &test_jwt_decode_2_hs512_kp);
 	ck_assert_int_eq(ret, EINVAL);
 	ck_assert_ptr_null(jwt);
@@ -418,6 +452,8 @@ START_TEST(test_jwt_decode_2_invalid_body)
 			     "3ViIjoidXNlcjAifQ.";
 	jwt_t *jwt;
 	int ret;
+
+	SET_OPS();
 
 	ret = jwt_decode_2(&jwt, token, &test_jwt_decode_2_hs512_kp);
 	ck_assert_int_eq(ret, EINVAL);
@@ -436,6 +472,8 @@ START_TEST(test_jwt_decode_invalid_base64)
 	jwt_t *jwt;
 	int ret;
 
+	SET_OPS();
+
 	ret = jwt_decode(&jwt, token, key256, sizeof(key256));
 	ck_assert_int_ne(ret, 0);
 	ck_assert_ptr_null(jwt);
@@ -448,32 +486,33 @@ static Suite *libjwt_suite(const char *title)
 {
 	Suite *s;
 	TCase *tc_core;
+	int i = ARRAY_SIZE(jwt_test_ops) - 1;
 
 	s = suite_create(title);
 
 	tc_core = tcase_create("jwt_new");
-	tcase_add_test(tc_core, test_jwt_new);
-	tcase_add_test(tc_core, test_jwt_dup);
-	tcase_add_test(tc_core, test_jwt_dup_signed);
-	tcase_add_test(tc_core, test_jwt_decode);
-	tcase_add_test(tc_core, test_jwt_decode_2);
-	tcase_add_test(tc_core, test_jwt_decode_invalid_alg);
-	tcase_add_test(tc_core, test_jwt_decode_ignore_typ);
-	tcase_add_test(tc_core, test_jwt_decode_invalid_head);
-	tcase_add_test(tc_core, test_jwt_decode_alg_none_with_key);
-	tcase_add_test(tc_core, test_jwt_decode_invalid_body);
-	tcase_add_test(tc_core, test_jwt_decode_2_invalid_body);
-	tcase_add_test(tc_core, test_jwt_decode_invalid_final_dot);
-	tcase_add_test(tc_core, test_jwt_decode_hs256);
-	tcase_add_test(tc_core, test_jwt_decode_hs256_no_key_alg);
-	tcase_add_test(tc_core, test_jwt_decode_hs384);
-	tcase_add_test(tc_core, test_jwt_decode_hs512);
-	tcase_add_test(tc_core, test_jwt_decode_2_hs512);
-	tcase_add_test(tc_core, test_jwt_decode_2_invalid);
-	tcase_add_test(tc_core, test_jwt_decode_invalid_base64);
+	tcase_add_loop_test(tc_core, test_jwt_new, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_dup, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_dup_signed, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_2, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_invalid_alg, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_ignore_typ, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_invalid_head, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_alg_none_with_key, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_invalid_body, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_2_invalid_body, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_invalid_final_dot, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_hs256, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_hs256_no_key_alg, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_hs384, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_hs512, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_2_hs512, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_2_invalid, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_invalid_base64, 0, i);
 
-	tcase_add_test(tc_core, test_jwt_decode_hs256_issue_1);
-	tcase_add_test(tc_core, test_jwt_decode_hs256_issue_2);
+	tcase_add_loop_test(tc_core, test_jwt_decode_hs256_issue_1, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_decode_hs256_issue_2, 0, i);
 
 	tcase_set_timeout(tc_core, 30);
 

@@ -18,7 +18,6 @@
 #include <jwt.h>
 
 #include "jwt-private.h"
-#include "config.h"
 
 /* Workaround to use GnuTLS 3.5 EC signature encode/decode functions that
  * are not public yet. */
@@ -84,18 +83,19 @@ static int gnutls_verify_sha_hmac(jwt_t *jwt, const char *head,
 {
 	char *sig_check, *buf = NULL;
 	unsigned int len;
-	int ret = EINVAL;
+	int ret;
 
-	if (!gnutls_sign_sha_hmac(jwt, &sig_check, &len, head, head_len)) {
-		buf = alloca(len * 2);
-		jwt_Base64encode(buf, sig_check, len);
-		jwt_base64uri_encode(buf);
+	if (gnutls_sign_sha_hmac(jwt, &sig_check, &len, head, head_len))
+		return EINVAL;
 
-		if (!jwt_strcmp(sig, buf))
-			ret = 0;
+	ret = jwt_base64uri_encode(&buf, sig_check, len);
+	if (ret <= 0 || buf == NULL)
+		return -ret;
 
-		jwt_freemem(sig_check);
-	}
+	ret = jwt_strcmp(sig, buf) ? EINVAL : 0;
+
+	jwt_freemem(buf);
+	jwt_freemem(sig_check);
 
 	return ret;
 }
@@ -156,7 +156,7 @@ static int gnutls_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 
 	/* EC */
 	case JWT_ALG_ES256:
-	/* XXX case JWT_ALG_ES256K: */
+	case JWT_ALG_ES256K:
 		alg = GNUTLS_DIG_SHA256;
 		pk_alg = GNUTLS_PK_EC;
 		break;
@@ -202,6 +202,10 @@ static int gnutls_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 		ret = EINVAL;
 		goto sign_clean_privkey;
 	}
+
+	/* XXX Get curve name for ES256K case and make sure it's secp256k1 */
+
+	/* XXX Get EC curve bits and make sure it matches ES* alg type */
 
 	/* Sign data */
 	if (gnutls_privkey_sign_data(privkey, alg, 0, &body_dat, &sig_dat)) {
@@ -323,7 +327,7 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 
 	/* EC */
 	case JWT_ALG_ES256:
-	/* XXX case JWT_ALG_ES256K: */
+	case JWT_ALG_ES256K:
 		alg = GNUTLS_SIGN_ECDSA_SHA256;
 		break;
 	case JWT_ALG_ES384:
@@ -342,7 +346,7 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 		return EINVAL;
 	}
 
-	sig = (unsigned char *)jwt_b64_decode(sig_b64, &sig_len);
+	sig = (unsigned char *)jwt_base64uri_decode(sig_b64, &sig_len);
 
 	if (sig == NULL)
 		return EINVAL;

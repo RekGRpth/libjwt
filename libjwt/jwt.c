@@ -13,8 +13,15 @@
 
 #include <jwt.h>
 
+#ifdef HAVE_LIBB64
+#include <b64/cencode.h>
+#include <b64/cdecode.h>
+#else
+#include "cencode.h"
+#include "cdecode.h"
+#endif
+
 #include "jwt-private.h"
-#include "config.h"
 
 /* Library init functionality */
 static struct jwt_crypto_ops *jwt_ops_available[] = {
@@ -441,14 +448,17 @@ static int get_js_bool(json_t *js, const char *key)
 	return val;
 }
 
-void *jwt_b64_decode(const char *src, int *ret_len)
+void *jwt_base64uri_decode(const char *src, int *ret_len)
 {
+	base64_decodestate state;
 	void *buf;
 	char *new;
 	int len, i, z;
 
 	/* Decode based on RFC-4648 URI safe encoding. */
 	len = (int)strlen(src);
+	/* When reversing the URI cleanse, we can possibly add up
+	 * to 3 '=' characters to replace the missing padding. */
 	new = alloca(len + 4);
 	if (!new)
 		return NULL;
@@ -472,11 +482,13 @@ void *jwt_b64_decode(const char *src, int *ret_len)
 	}
 	new[i] = '\0';
 
-	buf = jwt_malloc(i);
+	/* Now we have a standard base64 encoded string. */
+	buf = jwt_malloc(base64_decode_maxlength(len) + 1);
 	if (buf == NULL)
 		return NULL;
 
-	*ret_len = jwt_Base64decode(buf, new);
+	base64_init_decodestate(&state);
+	*ret_len = base64_decode_block(new, strlen(new), buf, &state);
 
 	if (*ret_len == 0) {
 		jwt_freemem(buf);
@@ -487,13 +499,13 @@ void *jwt_b64_decode(const char *src, int *ret_len)
 }
 
 
-static json_t *jwt_b64_decode_json(char *src)
+static json_t *jwt_base64uri_decode_to_json(char *src)
 {
 	json_t *js;
 	char *buf;
 	int len;
 
-	buf = jwt_b64_decode(src, &len);
+	buf = jwt_base64uri_decode(src, &len);
 
 	if (buf == NULL)
 		return NULL;
@@ -507,27 +519,45 @@ static json_t *jwt_b64_decode_json(char *src)
 	return js;
 }
 
-void jwt_base64uri_encode(char *str)
+int jwt_base64uri_encode(char **_dst, const char *plain, int plain_len)
 {
-	int len = (int)strlen(str);
-	int i, t;
+	base64_encodestate state;
+	int len, i;
+	char *dst;
 
-	for (i = t = 0; i < len; i++) {
-		switch (str[i]) {
+	base64_init_encodestate(&state);
+	/* Ensure no newlines are emitted into the string */
+	state.chars_per_line = 0;
+
+	len = base64_encode_length(plain_len, &state);
+	*_dst = jwt_malloc(len + 1);
+	if (*_dst == NULL)
+		return -ENOMEM;
+	dst = *_dst;
+
+	/* First, a normal base64 encoding */
+	len = base64_encode_block(plain, plain_len, dst, &state);
+	len += base64_encode_blockend(dst + len, &state);
+        dst[len] = 0;
+
+	/* Now for the URI encoding */
+	for (i = 0; i < len; i++) {
+		switch (dst[i]) {
 		case '+':
-			str[t++] = '-';
+			dst[i] = '-';
 			break;
 		case '/':
-			str[t++] = '_';
+			dst[i] = '_';
 			break;
 		case '=':
+			dst[i] = '\0';
 			break;
-		default:
-			str[t++] = str[i];
 		}
 	}
 
-	str[t] = '\0';
+	dst[i] = '\0';
+
+	return i;
 }
 
 static int jwt_sign(jwt_t *jwt, char **out, unsigned int *len, const char *str, unsigned int str_len)
@@ -607,7 +637,7 @@ static int jwt_parse_body(jwt_t *jwt, char *body)
 		jwt->grants = NULL;
 	}
 
-	jwt->grants = jwt_b64_decode_json(body);
+	jwt->grants = jwt_base64uri_decode_to_json(body);
 	if (!jwt->grants)
 		return EINVAL;
 
@@ -623,7 +653,7 @@ static int jwt_parse_head(jwt_t *jwt, char *head)
 		jwt->headers = NULL;
 	}
 
-	jwt->headers = jwt_b64_decode_json(head);
+	jwt->headers = jwt_base64uri_decode_to_json(head);
 	if (!jwt->headers)
 		return EINVAL;
 
@@ -1209,7 +1239,7 @@ char *jwt_dump_str(jwt_t *jwt, int pretty)
 
 static int jwt_encode(jwt_t *jwt, char **out)
 {
-	char *buf = NULL, *head, *body, *sig;
+	char *buf = NULL, *head = NULL, *body = NULL, *sig;
 	int ret, head_len, body_len;
 	unsigned int sig_len;
 
@@ -1226,11 +1256,12 @@ static int jwt_encode(jwt_t *jwt, char **out)
 		jwt_freemem(buf);
 		return ENOMEM;
 	}
-	jwt_Base64encode(head, buf, (int)strlen(buf));
-	head_len = (int)strlen(head);
-
+	head_len = jwt_base64uri_encode(&head, buf, (int)strlen(buf));
 	jwt_freemem(buf);
 	buf = NULL;
+
+	if (head_len <= 0)
+		return -head_len;
 
 	/* Now the body. */
 	ret = jwt_write_body(jwt, &buf, 0);
@@ -1240,27 +1271,29 @@ static int jwt_encode(jwt_t *jwt, char **out)
 		return ret;
 	}
 
-	body = alloca(strlen(buf) * 2);
-	if (body == NULL) {
-		jwt_freemem(buf);
-		return ENOMEM;
-	}
-	jwt_Base64encode(body, buf, (int)strlen(buf));
-	body_len = (int)strlen(body);
-
+	body_len = jwt_base64uri_encode(&body, buf, (int)strlen(buf));
 	jwt_freemem(buf);
 	buf = NULL;
 
-	jwt_base64uri_encode(head);
-	jwt_base64uri_encode(body);
+	if (body_len <= 0) {
+		jwt_freemem(head);
+		return -body_len;
+	}
 
 	/* Allocate enough to reuse as b64 buffer. */
 	buf = jwt_malloc(head_len + body_len + 2);
-	if (buf == NULL)
+	if (buf == NULL) {
+		jwt_freemem(head);
+		jwt_freemem(body);
 		return ENOMEM;
+	}
+
 	strcpy(buf, head);
 	strcat(buf, ".");
 	strcat(buf, body);
+
+	jwt_freemem(head);
+	jwt_freemem(body);
 
 	ret = __append_str(out, buf);
 	if (ret == 0)
@@ -1279,21 +1312,16 @@ static int jwt_encode(jwt_t *jwt, char **out)
 	/* Now the signature. */
 	ret = jwt_sign(jwt, &sig, &sig_len, buf, strlen(buf));
 	jwt_freemem(buf);
+	buf = NULL;
 
 	if (ret)
 		return ret;
 
-	buf = jwt_malloc(sig_len * 2);
-	if (buf == NULL) {
-		jwt_freemem(sig);
-		return ENOMEM;
-	}
-
-	jwt_Base64encode(buf, sig, sig_len);
-
+	ret = jwt_base64uri_encode(&buf, sig, sig_len);
 	jwt_freemem(sig);
+	if (ret <= 0)
+		return -ret;
 
-	jwt_base64uri_encode(buf);
 	ret = __append_str(out, buf);
 	jwt_freemem(buf);
 

@@ -6,32 +6,15 @@
 #include <errno.h>
 #include <time.h>
 
-#include <check.h>
-
-#include <jwt.h>
-
 #include "jwt_tests.h"
-
-/* Constant time to make tests consistent. */
-#define TS_CONST	1475980545L
-
-/* Macro to allocate a new JWT with checks. */
-#define ALLOC_JWT(__jwt) do {		\
-	int __ret = jwt_new(__jwt);	\
-	ck_assert_int_eq(__ret, 0);	\
-	ck_assert_ptr_ne(__jwt, NULL);	\
-} while(0)
-
-/* Older check doesn't have this. */
-#ifndef ck_assert_ptr_ne
-#define ck_assert_ptr_ne(X, Y) ck_assert(X != Y)
-#endif
 
 START_TEST(test_jwt_encode_fp)
 {
 	FILE *out;
 	jwt_t *jwt = NULL;
 	int ret = 0;
+
+	SET_OPS();
 
 	ALLOC_JWT(&jwt);
 
@@ -73,6 +56,8 @@ START_TEST(test_jwt_encode_str)
 	int ret = 0;
 	char *out;
 
+	SET_OPS();
+
 	ALLOC_JWT(&jwt);
 
 	ret = jwt_add_grant(jwt, "iss", "files.maclara-llc.com");
@@ -105,6 +90,8 @@ START_TEST(test_jwt_encode_alg_none)
 	jwt_t *jwt = NULL;
 	int ret = 0;
 	char *out;
+
+	SET_OPS();
 
 	ALLOC_JWT(&jwt);
 
@@ -141,6 +128,8 @@ START_TEST(test_jwt_encode_hs256)
 	jwt_t *jwt = NULL;
 	int ret = 0;
 	char *out;
+
+	SET_OPS();
 
 	ALLOC_JWT(&jwt);
 
@@ -183,6 +172,8 @@ START_TEST(test_jwt_encode_hs384)
 	int ret = 0;
 	char *out;
 
+	SET_OPS();
+
 	ALLOC_JWT(&jwt);
 
 	ret = jwt_add_grant(jwt, "iss", "files.maclara-llc.com");
@@ -224,6 +215,8 @@ START_TEST(test_jwt_encode_hs512)
 	int ret = 0;
 	char *out;
 
+	SET_OPS();
+
 	ALLOC_JWT(&jwt);
 
 	ret = jwt_add_grant(jwt, "iss", "files.maclara-llc.com");
@@ -263,6 +256,8 @@ START_TEST(test_jwt_encode_change_alg)
 	int ret = 0;
 	char *out;
 
+	SET_OPS();
+
 	ALLOC_JWT(&jwt);
 
 	ret = jwt_add_grant(jwt, "iss", "files.maclara-llc.com");
@@ -300,6 +295,8 @@ START_TEST(test_jwt_encode_invalid)
 				   "012345678901234567890123456789XY";
 	jwt_t *jwt = NULL;
 	int ret = 0;
+
+	SET_OPS();
 
 	ALLOC_JWT(&jwt);
 
@@ -348,6 +345,8 @@ START_TEST(test_jwt_encode_decode)
 	char *encoded;
 	int rc;
 
+	SET_OPS();
+
 	jwt_new(&mytoken);
 	jwt_add_grant(mytoken, "sub", "user0");
 	jwt_add_grant_int(mytoken, "iat", 1619130517);
@@ -368,20 +367,21 @@ static Suite *libjwt_suite(const char *title)
 {
 	Suite *s;
 	TCase *tc_core;
+	int i = ARRAY_SIZE(jwt_test_ops) - 1;
 
 	s = suite_create(title);
 
 	tc_core = tcase_create("jwt_encode");
 
-	tcase_add_test(tc_core, test_jwt_encode_fp);
-	tcase_add_test(tc_core, test_jwt_encode_str);
-	tcase_add_test(tc_core, test_jwt_encode_alg_none);
-	tcase_add_test(tc_core, test_jwt_encode_hs256);
-	tcase_add_test(tc_core, test_jwt_encode_hs384);
-	tcase_add_test(tc_core, test_jwt_encode_hs512);
-	tcase_add_test(tc_core, test_jwt_encode_change_alg);
-	tcase_add_test(tc_core, test_jwt_encode_invalid);
-	tcase_add_test(tc_core, test_jwt_encode_decode);
+	tcase_add_loop_test(tc_core, test_jwt_encode_fp, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_encode_str, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_encode_alg_none, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_encode_hs256, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_encode_hs384, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_encode_hs512, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_encode_change_alg, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_encode_invalid, 0, i);
+	tcase_add_loop_test(tc_core, test_jwt_encode_decode, 0, i);
 
 	tcase_set_timeout(tc_core, 30);
 
