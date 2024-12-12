@@ -1,64 +1,49 @@
+/* Copyright (C) 2024 Ben Collins <bcollins@maclara-llc.com>
+   This file is part of the JWT C Library
+
+   SPDX-License-Identifier:  MPL-2.0
+   This Source Code Form is subject to the terms of the Mozilla Public
+   License, v. 2.0. If a copy of the MPL was not distributed with this
+   file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+
+/* XXX BIG FAT WARNING: There's not much error checking here. */
+
+/* XXX: Also, requires OpenSSL v3. I wont accept patches for lower versions. */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
 #include <openssl/pem.h>
 #include <openssl/evp.h>
 #include <openssl/bio.h>
 #include <openssl/rsa.h>
 #include <openssl/bn.h>
 #include <openssl/core_names.h>
+#include <openssl/err.h>
+
 #include <jansson.h>
 
-/* Base64 URL encoding */
-static char *base64_url_encode(const void *bin, size_t len)
+#include <jwt.h>
+#include <jwt-private.h>
+
+static int ec_count, rsa_count, eddsa_count, rsa_pss_count;
+
+static void print_openssl_errors_and_exit()
 {
-	/* Setup base64 encoding */
-	BIO *b64 = BIO_new(BIO_f_base64());
-	BIO *mem = BIO_new(BIO_s_mem());
-	b64 = BIO_push(b64, mem);
-	BIO_set_flags(b64, BIO_FLAGS_BASE64_NO_NL);
-
-	/* Write the data to the chain */
-	BIO_write(b64, bin, len);
-	BIO_flush(b64);
-
-	/* Get the result */
-	BUF_MEM *bptr;
-	BIO_get_mem_ptr(b64, &bptr);
-
-	char *output = OPENSSL_malloc(bptr->length + 1);
-	memcpy(output, bptr->data, bptr->length);
-	output[bptr->length] = '\0';
-
-	BIO_free_all(b64);
-
-	/* URL encoding */
-	for (char *p = output; *p; p++) {
-		if (*p == '+')
-			*p = '-';
-		else if (*p == '/')
-			*p = '_';
-	}
-
-	/* Truncate at '=' */
-	char *p = strchr(output, '=');
-	if (p)
-		*p = '\0';
-
-	/* Caller must free this */
-	return output;
+	ERR_print_errors_fp(stderr);
+	exit(EXIT_FAILURE);
 }
 
-/* Get the number of bits and return the JWT alg type based
+/* Get the number of bits of an EC key and return the JWT alg type based
  * on the result. */
 static const char *ec_alg_type(EVP_PKEY *pkey)
 {
 	int degree, curve_nid;
 	EC_GROUP *group;
 	char curve_name[256];
-	size_t len;
 
-	EVP_PKEY_get_group_name(pkey, curve_name, sizeof(curve_name), &len);
+	EVP_PKEY_get_group_name(pkey, curve_name, sizeof(curve_name), NULL);
 
 	curve_nid = OBJ_txt2nid(curve_name);
 
@@ -81,12 +66,12 @@ static const char *ec_alg_type(EVP_PKEY *pkey)
 	}
 
 	/* Just guess at this point */
-	fprintf(stderr, "Unexpected EC degree [%d]\n", degree);
+	fprintf(stderr, "Unexpected EC degree [%d], defaulting to ES256\n", degree);
 	return "ES256";
 }
 
-/* Retrieves and b64url-encodes a single OSSL BIGNUM param
- * and adds it to the JSON object as a string. */
+/* Retrieves and b64url-encodes a single OSSL BIGNUM param and adds it to
+ * the JSON object as a string. */
 static void get_one_bn(EVP_PKEY *pkey, const char *ossl_param,
 		       json_t *jwk, const char *name)
 {
@@ -100,15 +85,15 @@ static void get_one_bn(EVP_PKEY *pkey, const char *ossl_param,
 	BN_bn2bin(bn, bin);
 	BN_free(bn);
 
-	/* Convert */
-	char *b64 = base64_url_encode(bin, len);
+	/* Encode */
+	char *b64;
+	jwt_base64uri_encode(&b64, (char *)bin, len);
 	OPENSSL_free(bin);
 	json_object_set_new(jwk, name, json_string(b64));
-	OPENSSL_free(b64);
+	jwt_freemem(b64);
 }
 
-/* Retrieves a single OSSL string param and adds it to the
- * JSON object. */
+/* Retrieves a single OSSL string param and adds it to the  JSON object. */
 static void get_one_string(EVP_PKEY *pkey, const char *ossl_param,
 			   json_t *jwk, const char *name)
 {
@@ -118,31 +103,36 @@ static void get_one_string(EVP_PKEY *pkey, const char *ossl_param,
 	json_object_set_new(jwk, name, json_string(buf));
 }
 
-/* Retrieves and b64url encodes a single OSSL octet param
- * and adds it to the JSON object as a string. */
+/* Retrieves and b64url-encodes a single OSSL octet param and adds it to
+ * the JSON object as a string. */
 static void get_one_octet(EVP_PKEY *pkey, const char *ossl_param,
                           json_t *jwk, const char *name)
 {
 	unsigned char buf[256];
 	size_t len;
 	EVP_PKEY_get_octet_string_param(pkey, ossl_param, buf, sizeof(buf), &len);
-        char *b64 = base64_url_encode(buf, len);
+        char *b64;
+	jwt_base64uri_encode(&b64, (char *)buf, len);
 	json_object_set_new(jwk, name, json_string(b64));
-        OPENSSL_free(b64);
+        jwt_freemem(b64);
 }
 
 /* For ECC Keys (ES256, ES384, ES512) */
 static void process_ec_key(EVP_PKEY *pkey, int priv, json_t *jwk)
 {
+	const char *alg_type = ec_alg_type(pkey);
+
+	json_object_set_new(jwk, "alg", json_string(alg_type));
+
 	get_one_string(pkey, OSSL_PKEY_PARAM_GROUP_NAME, jwk, "crv");
-	json_object_set_new(jwk, "alg", json_string(ec_alg_type(pkey)));
+
 	get_one_bn(pkey, OSSL_PKEY_PARAM_EC_PUB_X, jwk, "x");
 	get_one_bn(pkey, OSSL_PKEY_PARAM_EC_PUB_Y, jwk, "y");
 	if (priv)
 		get_one_bn(pkey, OSSL_PKEY_PARAM_PRIV_KEY, jwk, "d");
 }
 
-/* For EdDSA keys (OKP) */
+/* For EdDSA keys (EDDSA) */
 static void process_eddsa_key(EVP_PKEY *pkey, int priv, json_t *jwk)
 {
 	get_one_octet(pkey, OSSL_PKEY_PARAM_PUB_KEY, jwk, "x");
@@ -168,22 +158,14 @@ static void process_rsa_key(EVP_PKEY *pkey, int priv, json_t *jwk)
 	get_one_bn(pkey, OSSL_PKEY_PARAM_RSA_COEFFICIENT1, jwk, "qi");
 }
 
-int main(int argc, char **argv)
+static json_t *parse_one_file(const char *file)
 {
-	int priv = 0, type;
+	int priv = 0;
 	FILE *fp;
-	const char *pem_file;
-	char *jwk_str;
 	EVP_PKEY *pkey;
 	json_t *jwk, *ops;
 
-	if (argc != 2) {
-		fprintf(stderr, "Usage: %s <PEM file>\n", argv[0]);
-		exit(EXIT_FAILURE);
-	}
-
-	pem_file = argv[1];
-	fp = fopen(pem_file, "r");
+	fp = fopen(file, "r");
 	if (!fp) {
 		perror("Error opening PEM file");
 		exit(EXIT_FAILURE);
@@ -200,8 +182,8 @@ int main(int argc, char **argv)
 	fclose(fp);
 
 	if (pkey == NULL) {
-		fprintf(stderr, "Error parsing key file");
-		exit(EXIT_FAILURE);
+		fprintf(stderr, "Error parsing key file\n");
+		print_openssl_errors_and_exit();
 	}
 
 	/* Setup json object */
@@ -216,34 +198,87 @@ int main(int argc, char **argv)
 	json_object_set_new(jwk, "key_ops", ops);
 
 	/* Process per key type params */
-	type = EVP_PKEY_get_base_id(pkey);
-
-	if (type == EVP_PKEY_RSA) {
+	switch (EVP_PKEY_get_base_id(pkey)) {
+	case EVP_PKEY_RSA:
 		json_object_set_new(jwk, "kty", json_string("RSA"));
 		process_rsa_key(pkey, priv, jwk);
-	} else if (type == EVP_PKEY_EC) {
+		rsa_count++;
+		break;
+
+	case EVP_PKEY_EC:
 		json_object_set_new(jwk, "kty", json_string("EC"));
 		process_ec_key(pkey, priv, jwk);
-	} else if (type == EVP_PKEY_ED25519) {
+		ec_count++;
+		break;
+
+	case EVP_PKEY_ED25519:
 		json_object_set_new(jwk, "kty", json_string("OKP"));
 		json_object_set_new(jwk, "crv", json_string("Ed25519"));
+		json_object_set_new(jwk, "alg", json_string("EDDSA"));
 		process_eddsa_key(pkey, priv, jwk);
-	} else if (type == EVP_PKEY_RSA_PSS) {
-		/* XXX We need a way to designate this for PS only ??? */
+		eddsa_count++;
+		break;
+
+	case EVP_PKEY_RSA_PSS:
+		/* XXX We need a way to designate this for PS alg only ???
+		 * For now, default to PS256. */
 		json_object_set_new(jwk, "kty", json_string("RSA"));
+		json_object_set_new(jwk, "alg", json_string("PS256"));
 		process_rsa_key(pkey, priv, jwk);
-	} else {
-		fprintf(stderr, "Skipped key type: %d\n", type);
+		rsa_pss_count++;
+		break;
+
+	default:
+		fprintf(stderr, "Skipped unknown key type: %s\n", file);
 	}
 
 	EVP_PKEY_free(pkey);
 
-	/* Print json in nice format */
-	jwk_str = json_dumps(jwk, JSON_INDENT(2));
+	return jwk;
+}
+
+int main(int argc, char **argv)
+{
+	json_t *jwk_set, *jwk_array, *jwk;
+	char *jwk_str;
+	int i;
+
+	if (argc < 2) {
+		fprintf(stderr, "Usage: %s <PEM file(s)>\n", argv[0]);
+		exit(EXIT_FAILURE);
+	}
+
+	fprintf(stderr, "Parsing %d files (", argc - 1);
+
+	jwk_array = json_array();
+
+	for (i = 1; i < argc; i++) {
+		jwk = parse_one_file(argv[i]);
+		json_array_append_new(jwk_array, jwk);
+		fprintf(stderr, ".");
+	}
+	fprintf(stderr, ") done\n");
+
+	fprintf(stderr, "Parse results:\n");
+	if (ec_count)
+		fprintf(stderr, "  EC     : %d\n", ec_count);
+	if (rsa_count)
+		fprintf(stderr, "  RSA    : %d\n", rsa_count);
+	if (rsa_pss_count)
+		fprintf(stderr, "  RSA-PSS: %d\n", rsa_pss_count);
+	if (eddsa_count)
+		fprintf(stderr, "  EdDSA  : %d\n", eddsa_count);
+	fprintf(stderr, "\n");
+
+	fprintf(stderr, "Generating JWKS...\n");
+
+	jwk_set = json_object();
+	json_object_set_new(jwk_set, "keys", jwk_array);
+
+	jwk_str = json_dumps(jwk_set, JSON_INDENT(2));
 	printf("%s\n", jwk_str);
 
 	free(jwk_str);
-	json_decref(jwk);
 
 	exit(EXIT_SUCCESS);
 }
