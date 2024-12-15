@@ -13,13 +13,8 @@
 
 #include <jwt.h>
 
-#ifdef HAVE_LIBB64
-#include <b64/cencode.h>
-#include <b64/cdecode.h>
-#else
-#include "cencode.h"
-#include "cdecode.h"
-#endif
+/* https://github.com/zhicheng/base64 */
+#include "base64.h"
 
 #include "jwt-private.h"
 
@@ -450,16 +445,18 @@ static int get_js_bool(json_t *js, const char *key)
 
 void *jwt_base64uri_decode(const char *src, int *ret_len)
 {
-	base64_decodestate state;
 	void *buf;
 	char *new;
 	int len, i, z;
+
+	if (src == NULL || ret_len == NULL)
+		return NULL; // Should really be an abort
 
 	/* Decode based on RFC-4648 URI safe encoding. */
 	len = (int)strlen(src);
 	/* When reversing the URI cleanse, we can possibly add up
 	 * to 3 '=' characters to replace the missing padding. */
-	new = alloca(len + 4);
+	new = jwt_malloc(len + 4);
 	if (!new)
 		return NULL;
 
@@ -481,16 +478,19 @@ void *jwt_base64uri_decode(const char *src, int *ret_len)
 			new[i++] = '=';
 	}
 	new[i] = '\0';
+	len = i;
 
 	/* Now we have a standard base64 encoded string. */
-	buf = jwt_malloc(base64_decode_maxlength(len) + 1);
-	if (buf == NULL)
+	buf = jwt_malloc(BASE64_DECODE_OUT_SIZE(len) + 1);
+	if (buf == NULL) {
+		jwt_freemem(new);
 		return NULL;
+	}
 
-	base64_init_decodestate(&state);
-	*ret_len = base64_decode_block(new, strlen(new), buf, &state);
+	*ret_len = base64_decode(new, len, buf);
+	jwt_freemem(new);
 
-	if (*ret_len == 0) {
+	if (*ret_len <= 0) {
 		jwt_freemem(buf);
 		buf = NULL;
 	}
@@ -521,24 +521,20 @@ static json_t *jwt_base64uri_decode_to_json(char *src)
 
 int jwt_base64uri_encode(char **_dst, const char *plain, int plain_len)
 {
-	base64_encodestate state;
 	int len, i;
 	char *dst;
 
-	base64_init_encodestate(&state);
-	/* Ensure no newlines are emitted into the string */
-	state.chars_per_line = 0;
-
-	len = base64_encode_length(plain_len, &state);
-	*_dst = jwt_malloc(len + 1);
-	if (*_dst == NULL)
+	len = BASE64_ENCODE_OUT_SIZE(plain_len);
+	dst = jwt_malloc(len + 1);
+	if (dst == NULL)
 		return -ENOMEM;
-	dst = *_dst;
 
 	/* First, a normal base64 encoding */
-	len = base64_encode_block(plain, plain_len, dst, &state);
-	len += base64_encode_blockend(dst + len, &state);
-        dst[len] = 0;
+	len = base64_encode((const unsigned char *)plain, plain_len, dst);
+	if (len <= 0) {
+		jwt_freemem(dst);
+		return 0;
+	}
 
 	/* Now for the URI encoding */
 	for (i = 0; i < len; i++) {
@@ -555,7 +551,9 @@ int jwt_base64uri_encode(char **_dst, const char *plain, int plain_len)
 		}
 	}
 
+	/* Just in case there's no padding. */
 	dst[i] = '\0';
+	*_dst = dst;
 
 	return i;
 }

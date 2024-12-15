@@ -2,7 +2,7 @@ EXTRA_DIST = jwt-private.h CMakeLists.txt cencode.h cdecode.h ccommon.h
 
 lib_LTLIBRARIES = libjwt.la
 
-libjwt_la_SOURCES = jwt.c
+libjwt_la_SOURCES = jwt.c jwks.c base64.c
 
 # SONAME History
 # v1.12.0 => v1.12.1      0 => 1
@@ -15,15 +15,11 @@ libjwt_la_CFLAGS = $(JANSSON_CFLAGS) $(OPENSSL_CFLAGS) $(GNUTLS_CFLAGS) $(CODE_C
 libjwt_la_LIBADD = $(JANSSON_LIBS) $(OPENSSL_LIBS) $(GNUTLS_LIBS) $(CODE_COVERAGE_LDFLAGS)
 
 if HAVE_OPENSSL
-libjwt_la_SOURCES += jwt-openssl.c
+libjwt_la_SOURCES += jwt-openssl.c jwks-openssl.c
 endif
 
 if HAVE_GNUTLS
 libjwt_la_SOURCES += jwt-gnutls.c
-endif
-
-if !HAVE_LIBB64
-libjwt_la_SOURCES += cdecode.c cencode.c
 endif
 
 pkgconfiglibdir = $(libdir)/pkgconfig
