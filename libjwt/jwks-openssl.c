@@ -13,29 +13,7 @@
 #include <jwt.h>
 #include "jwt-private.h"
 
-#if OPENSSL_VERSION_NUMBER < 0x30000000L
-
-static const char not_implemented[] = "Requires OpenSSL 3";
-
-int process_eddsa_jwk(json_t *jwk, jwk_item_t *item)
-{
-	jwks_write_error(item, not_implemented);
-	return -1;
-}
-
-int process_rsa_jwk(json_t *jwk, jwk_item_t *item)
-{
-	jwks_write_error(item, not_implemented);
-	return -1;
-}
-
-int process_ec_jwk(json_t *jwk, jwk_item_t *item)
-{
-	jwks_write_error(item, not_implemented);
-	return -1;
-}
-
-#else /* OpenSSL 3 */
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
 
 #include <openssl/pem.h>
 #include <openssl/evp.h>
@@ -183,6 +161,9 @@ static int pctx_to_pem(EVP_PKEY_CTX *pctx, OSSL_PARAM *params,
 		goto cleanup_pem;
 	}
 
+	item->provider_data = pkey;
+	item->provider = JWT_CRYPTO_OPS_OPENSSL;
+
 	bio = BIO_new(BIO_s_mem());
 	if (bio == NULL) {
 		jwks_write_error(item, "Unable to allocate memory for PEM BIO");
@@ -200,7 +181,7 @@ static int pctx_to_pem(EVP_PKEY_CTX *pctx, OSSL_PARAM *params,
 	}
 
 	len = BIO_get_mem_data(bio, &src);
-	dest = jwt_malloc(len + 1);
+	dest = OPENSSL_malloc(len + 1);
 	if (dest == NULL) {
 		jwks_write_error(item, "Error allocating memory for PEM");
 		goto cleanup_pem;
@@ -212,14 +193,13 @@ static int pctx_to_pem(EVP_PKEY_CTX *pctx, OSSL_PARAM *params,
 	ret = 0;
 
 cleanup_pem:
-	EVP_PKEY_free(pkey);
 	BIO_free(bio);
 
 	return ret;
 }
 
 /* For EdDSA keys (EDDSA) */
-int process_eddsa_jwk(json_t *jwk, jwk_item_t *item)
+int openssl_process_eddsa(json_t *jwk, jwk_item_t *item)
 {
 	unsigned char *pub_bin = NULL, *priv_bin = NULL;
 	OSSL_PARAM *params = NULL;
@@ -239,7 +219,7 @@ int process_eddsa_jwk(json_t *jwk, jwk_item_t *item)
 	}
 
 	if (d != NULL)
-		priv = 1;
+		item->is_private_key = priv = 1;
 	
 	pctx = EVP_PKEY_CTX_new_from_name(NULL, "ED25519", NULL);
 	if (pctx == NULL) {
@@ -293,7 +273,7 @@ cleanup_eddsa:
 
 /* For RSA keys (RS256, RS384, RS512). Also works for RSA-PSS
  * (PS256, PS384, PS512) */
-int process_rsa_jwk(json_t *jwk, jwk_item_t *item)
+int openssl_process_rsa(json_t *jwk, jwk_item_t *item)
 {
 	OSSL_PARAM_BLD *build = NULL;
 	json_t *n, *e, *d, *p, *q, *dp, *dq, *qi, *alg;
@@ -330,7 +310,7 @@ int process_rsa_jwk(json_t *jwk, jwk_item_t *item)
 
 	/* Priv vs PUB */
 	if (d && p && q && dp && dq && qi) {
-		priv = 1;
+		item->is_private_key = priv = 1;
 	} else if (!d && !p && !q && !dp && !dq && !qi) {
 		priv = 0;
 	} else {
@@ -405,7 +385,7 @@ cleanup_rsa:
 }
 
 /* For EC Keys (ES256, ES384, ES512) */
-int process_ec_jwk(json_t *jwk, jwk_item_t *item)
+int openssl_process_ec(json_t *jwk, jwk_item_t *item)
 {
 	OSSL_PARAM *params = NULL;
 	OSSL_PARAM_BLD *build = NULL;
@@ -422,16 +402,19 @@ int process_ec_jwk(json_t *jwk, jwk_item_t *item)
 	d = json_object_get(jwk, "d");
 
 	/* Check the minimal for pub key */
-	if (crv == NULL || x == NULL || y == NULL) {
-		jwks_write_error(item, "Missing one of crv, x, or y for pub key");
+	if (crv == NULL || x == NULL || y == NULL ||
+	    !json_is_string(crv) || !json_is_string(x) || !json_is_string(y)) {
+		jwks_write_error(item, "Missing or invalid type for one of crv, x, or y for pub key");
 		goto cleanup_ec;
 	}
 
 	crv_str = json_string_value(crv);
+	strncpy(item->curve, crv_str, sizeof(item->curve));
+	item->curve[sizeof(item->curve) - 1] = '\0';
 
 	/* Only private keys contain this field */
 	if (d != NULL)
-		priv = 1;
+		item->is_private_key = priv = 1;
 
 	pctx = EVP_PKEY_CTX_new_from_name(NULL, "EC", NULL);
 	if (pctx == NULL) {
@@ -483,6 +466,46 @@ cleanup_ec:
 	BN_free(bn);
 
 	return ret;
+}
+
+void openssl_process_item_free(jwk_item_t *item)
+{
+	if (item == NULL || item->provider != JWT_CRYPTO_OPS_OPENSSL)
+		return;
+
+	EVP_PKEY_free(item->provider_data);
+	OPENSSL_free(item->pem);
+
+	item->pem = NULL;
+	item->provider_data = NULL;
+	item->provider = JWT_CRYPTO_OPS_NONE;
+}
+
+#else /* OpenSSL 3 */
+
+static const char not_implemented[] = "OpenSSL Support for JWK requires 3.0 or higher";
+
+int openssl_process_eddsa(json_t *jwk, jwk_item_t *item)
+{
+	jwks_write_error(item, not_implemented);
+	return -1;
+}
+
+int openssl_process_rsa(json_t *jwk, jwk_item_t *item)
+{
+	jwks_write_error(item, not_implemented);
+	return -1;
+}
+
+int openssl_process_ec(json_t *jwk, jwk_item_t *item)
+{
+	jwks_write_error(item, not_implemented);
+	return -1;
+}
+
+void openssl_process_item_free(jwk_item_t *item)
+{
+	return;
 }
 
 #endif /* OpenSSL 3 */

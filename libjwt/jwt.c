@@ -30,9 +30,11 @@ static struct jwt_crypto_ops *jwt_ops_available[] = {
 };
 
 #ifdef HAVE_OPENSSL
-static struct jwt_crypto_ops *jwt_ops = &jwt_openssl_ops;
+struct jwt_crypto_ops *jwt_ops = &jwt_openssl_ops;
+#elif defined HAVE_GNUTLS
+struct jwt_crypto_ops *jwt_ops = &jwt_gnutls_ops;
 #else
-static struct jwt_crypto_ops *jwt_ops = &jwt_gnutls_ops;
+#error No crypto ops providers are enabled
 #endif
 
 const char *jwt_get_crypto_ops(void)
@@ -41,6 +43,30 @@ const char *jwt_get_crypto_ops(void)
 		return "(unknown)";
 
 	return jwt_ops->name;
+}
+
+jwt_crypto_provider_t jwt_get_crypto_ops_t(void)
+{
+	if (jwt_ops == NULL)
+		return JWT_CRYPTO_OPS_NONE;
+
+	return jwt_ops->provider;
+}
+
+int jwt_set_crypto_ops_t(jwt_crypto_provider_t opname)
+{
+	int i;
+
+	/* The user asked for something, let's give it a try */
+	for (i = 0; jwt_ops_available[i] != NULL; i++) {
+		if (jwt_ops_available[i]->provider != opname)
+			continue;
+
+		jwt_ops = jwt_ops_available[i];
+		return 0;
+	}
+
+	return EINVAL;
 }
 
 int jwt_set_crypto_ops(const char *opname)
@@ -59,7 +85,13 @@ int jwt_set_crypto_ops(const char *opname)
 	return EINVAL;
 }
 
-__attribute__((constructor)) void jwt_init()
+int jwt_crypto_ops_supports_jwk(void)
+{
+	return jwt_ops->jwk_implemented ? 1 : 0;
+}
+
+__attribute__((constructor))
+void jwt_init()
 {
 	const char *opname = getenv("JWT_CRYPTO");
 
@@ -391,7 +423,7 @@ static const char *get_js_string(json_t *js, const char *key)
 
 	js_val = json_object_get(js, key);
 	if (js_val) {
-		if (json_typeof(js_val) == JSON_STRING)
+		if (json_is_string(js_val))
 			val = json_string_value(js_val);
 		else
 			errno = EINVAL;
@@ -409,7 +441,7 @@ static long get_js_int(json_t *js, const char *key)
 
 	js_val = json_object_get(js, key);
 	if (js_val) {
-		if (json_typeof(js_val) == JSON_INTEGER)
+		if (json_is_integer(js_val))
 			val = (long)json_integer_value(js_val);
 		else
 			errno = EINVAL;
@@ -657,7 +689,7 @@ static int jwt_parse_head(jwt_t *jwt, char *head)
 
 	alg = get_js_string(jwt->headers, "alg");
 	jwt->alg = jwt_str_alg(alg);
-	if (jwt->alg == JWT_ALG_INVAL)
+	if (jwt->alg >= JWT_ALG_INVAL)
 		return EINVAL;
 
 	return 0;
