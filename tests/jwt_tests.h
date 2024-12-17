@@ -6,7 +6,9 @@
 #include <jwt.h>
 #include <check.h>
 
+#ifdef HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 /* Compatibility with older libCheck versions */
 /* Older check doesn't have this. */
@@ -38,6 +40,9 @@ static jwt_test_op_t jwt_test_ops[] = {
 #endif
 #ifdef HAVE_GNUTLS
 	{ .name ="gnutls", .type = JWT_CRYPTO_OPS_GNUTLS },
+#endif
+#ifdef HAVE_MBEDTLS
+	{ .name ="mbedtls", .type = JWT_CRYPTO_OPS_MBEDTLS },
 #endif
 };
 

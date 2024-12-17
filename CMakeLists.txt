@@ -1,108 +1,153 @@
 cmake_minimum_required (VERSION 3.7...3.15)
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
-set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+# Extract info from configure.ac
+include(AutoToolsVersion)
 
-if (${CMAKE_VERSION} VERSION_LESS 3.14.7 AND ${CMAKE_GENERATOR} STREQUAL "Visual Studio 16 2019")
-	message(FATAL_ERROR "Please update your version of CMake to version 3.14.7 or greater in order to use Visual Studio 2019")
+project(${LIBJWT_PROJECT} VERSION ${LIBJWT_VERSION} LANGUAGES C)
+set(CMAKE_C_FLAGS -Wall)
+
+# Find all the things we need for the library
+find_package(PkgConfig REQUIRED)
+
+pkg_check_modules(JANSSON jansson>=2.0 REQUIRED)
+
+# Need at least one of these
+pkg_check_modules(GNUTLS gnutls>=3.6.0)
+pkg_check_modules(OPENSSL openssl>=1.1.0)
+
+# Tests and coverage depend on this, but optional
+pkg_check_modules(CHECK check>=0.9.4)
+
+add_library(jwt SHARED)
+add_library(jwt_static STATIC)
+
+target_sources(jwt PRIVATE libjwt/jwt.c libjwt/jwks.c libjwt/base64.c)
+
+include_directories(${CMAKE_SOURCE_DIR}/include)
+
+target_link_libraries(jwt PRIVATE ${JANSSON_LINK_LIBRARIES})
+target_include_directories(jwt PRIVATE
+	${JANSSON_INCLUDE_DIRS})
+
+# Process the detected packages
+
+if (GNUTLS_FOUND)
+	set(HAVE_CRYPTO 1)
+        add_definitions(-DHAVE_GNUTLS)
+	target_link_libraries(jwt PRIVATE ${GNUTLS_LINK_LIBRARIES})
+	target_include_directories(jwt PRIVATE
+		${GNUTLS_INCLUDE_DIRS})
+	target_sources(jwt PRIVATE libjwt/jwt-gnutls.c libjwt/jwks-gnutls.c)
 endif()
 
-if (MSVC)
-	set (CMAKE_SYSTEM_VERSION 8.1 CACHE TYPE INTERNAL FORCE)
-endif ()
-
-project (jwt)
-
-string(REPLACE "\\" "/" CMAKE_INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX})
-
-option (ENABLE_DEBUG_INFO_IN_RELEASE "Enable adding debug info to release build." OFF)
-option (ENABLE_LTO "Enable link time optimizations." OFF)
-option (BUILD_EXAMPLES "Build example projects." ON)
-
-if (MSVC)
-	option (STATIC_RUNTIME "Link runtome library statically." OFF)
-endif ()
-
-if (UNIX)
-	option (BUILD_TESTS "Build test projects." OFF)
-endif ()
-
-if (APPLE)
-	add_definitions(-DNO_WEAK_ALIASES)
-endif ()
-include_directories (include)
-
-if (MSVC)
-	set (CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Ox")
-endif ()
-
-if (STATIC_RUNTIME)
-	set (CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /MTd")
-	set (CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT")
-	set (CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL} /MT")
-	set (CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} /MT")
-endif ()
-
-if (ENABLE_DEBUG_INFO_IN_RELEASE)
-	if (MSVC)
-		set (CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /Zi")
-		set (CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
-		set (CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /DEBUG /OPT:REF /OPT:ICF")
-	else ()
-		set (CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -g")
-	endif ()
-endif ()
-
-if (ENABLE_LTO)
-	if (MSVC)
-		set (CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /GL")
-		set (CMAKE_C_FLAGS_MINSIZEREL "${CMAKE_C_FLAGS_MINSIZEREL} /GL")
-		set (CMAKE_C_FLAGS_RELWITHDEBINFO "${CMAKE_C_FLAGS_RELWITHDEBINFO} /GL")
-
-		set (CMAKE_EXE_LINKER_FLAGS_RELEASE "${CMAKE_EXE_LINKER_FLAGS_RELEASE} /LTCG")
-		set (CMAKE_EXE_LINKER_FLAGS_MINSIZEREL "${CMAKE_EXE_LINKER_FLAGS_MINSIZEREL} /LTCG")
-		set (CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO} /LTCG")
-
-		set (CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} /LTCG")
-		set (CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL "${CMAKE_SHARED_LINKER_FLAGS_MINSIZEREL} /LTCG")
-		set (CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO "${CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO} /LTCG")
-	endif ()
-endif ()
-
-add_subdirectory (libjwt)
-
-if (${BUILD_EXAMPLES})
-	add_subdirectory (examples)
+if (OPENSSL_FOUND)
+	set(HAVE_CRYPTO 1)
+	add_definitions(-DHAVE_OPENSSL)
+	target_link_libraries(jwt PRIVATE ${OPENSSL_LINK_LIBRARIES})
+	target_include_directories(jwt PRIVATE
+		${OPENSSL_INCLUDE_DIRS})
+	target_sources(jwt PRIVATE libjwt/jwt-openssl.c libjwt/jwks-openssl.c)
 endif()
 
-if (${BUILD_TESTS})
-	add_subdirectory (tests)
-endif ()
+# We need one of the things above to even work
+if (NOT HAVE_CRYPTO)
+	message(FATAL_ERROR "No crypto support detected")
+endif()
 
+# Setup the static library by copying shared lib
+get_target_property(STATIC_LINK_LIBRARIES jwt LINK_LIBRARIES)
+get_target_property(STATIC_INCLUDE_DIRECTORIES jwt INCLUDE_DIRECTORIES)
+get_target_property(STATIC_SOURCES jwt SOURCES)
 
-# extract version from configure.ac
-FILE(READ "${CMAKE_CURRENT_SOURCE_DIR}/configure.ac" configure_ac_contents)
-STRING(REGEX REPLACE ";" "\\\\;" configure_ac_contents "${configure_ac_contents}")
-STRING(REGEX REPLACE "\n" ";" configure_ac_contents "${configure_ac_contents}")
-foreach(configure_ac_line ${configure_ac_contents})
-	if("${configure_ac_line}" MATCHES "^[ ]*AC_INIT")
-		string(REGEX MATCH "[0-9]+\.[0-9]+\.[0-9]+" version_string "${configure_ac_line}")
-		message(STATUS "version from configure.ac: '${version_string}'")
-		break()
+target_sources(jwt_static PRIVATE ${STATIC_SOURCES})
+target_link_libraries(jwt_static PRIVATE ${STATIC_LINK_LIBRARIES})
+target_include_directories(jwt_static PRIVATE ${STATIC_INCLUDE_DIRECTORIES})
+
+target_include_directories(jwt PUBLIC
+	$<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
+	$<INSTALL_INTERFACE:include>
+)
+
+# Define versioning for the library (comes from configure.ac)
+set_target_properties(jwt PROPERTIES
+	VERSION ${LIBJWT_VERSION_INFO}
+	SOVERSION ${LIBJWT_COMPATVERSION}
+)
+
+add_definitions(-D_GNU_SOURCE)
+add_definitions(-DKEYDIR=\"${CMAKE_SOURCE_DIR}/tests/keys\")
+
+# Install header
+install(FILES include/jwt.h DESTINATION include)
+
+# Install library
+install(TARGETS jwt
+	EXPORT ${LIBJWT_PROJECT}Targets
+	ARCHIVE DESTINATION lib
+	LIBRARY DESTINATION lib
+	RUNTIME DESTINATION bin
+)
+
+install(EXPORT ${LIBJWT_PROJECT}Targets
+	FILE ${LIBJWT_PROJECT}Config.cmake
+	NAMESPACE ${LIBJWT_PROJECT}::
+	DESTINATION lib/cmake/${LIBJWT_PROJECT}
+)
+
+# We do this to make it compatible with autotools
+set(PACKAGE_NAME ${PROJECT_NAME})
+set(PACKAGE_VERSION ${PROJECT_VERSION})
+set(prefix ${CMAKE_INSTALL_PREFIX})
+string(REGEX REPLACE ";" " " JANSSON_LIBS "${JANSSON_LDFLAGS}")
+string(REGEX REPLACE ";" " " OPENSSL_LIBS "${OPENSSL_LDFLAGS}")
+string(REGEX REPLACE ";" " " GNUTLS_LIBS "${GNUTLS_LDFLAGS}")
+configure_file(libjwt/libjwt.pc.in libjwt.pc @ONLY)
+install(FILES ${CMAKE_BINARY_DIR}/libjwt.pc DESTINATION lib/pkgconfig)
+
+find_package(Doxygen)
+if (DOXYGEN_FOUND)
+	doxygen_add_docs(doxygen-doc
+		libjwt libjwt include
+		CONFIG_FILE ${CMAKE_SOURCE_DIR}/doxygen.cfg
+		COMMENT "Generating API documentation with Doxygen")
+	set(DOXYGEN_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/html")
+endif()
+
+option(ENABLE_COVERAGE "Enable code coverage rules" OFF)
+
+if (CHECK_FOUND)
+	enable_testing()
+
+	set (TARGET_NAMES jwt_dump jwt_ec jwt_encode jwt_grant jwt_header
+		jwt_new jwt_rsa jwt_validate jwt_rsa_pss jwt_eddsa
+		jwt_crypto jwt_es256k)
+
+	if (OPENSSL_FOUND)
+		# For now, only OpenSSL supports JWKS tests
+		list (APPEND TARGET_NAMES jwt_jwks jwt_jwks_errors
+			jwt_jwks_ec jwt_jwks_rsa)
 	endif()
-endforeach()
 
-set(INCLUDE_INSTALL_DIR include/)
-set(LIB_INSTALL_DIR lib/)
-set(LIBJWT_VERSION ${version_string})
-include(CMakePackageConfigHelpers)
-configure_package_config_file(cmake/libjwtConfig.cmake.in
-  ${CMAKE_CURRENT_BINARY_DIR}/libjwtConfig.cmake
-  INSTALL_DESTINATION ${LIB_INSTALL_DIR}/libjwt/cmake
-  PATH_VARS INCLUDE_INSTALL_DIR)
-write_basic_package_version_file(
-  ${CMAKE_CURRENT_BINARY_DIR}/libjwtConfigVersion.cmake
-  VERSION ${LIBJWT_VERSION}
-  COMPATIBILITY SameMajorVersion )
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/libjwtConfig.cmake
-              ${CMAKE_CURRENT_BINARY_DIR}/libjwtConfigVersion.cmake
-        DESTINATION ${LIB_INSTALL_DIR}/libjwt/cmake )
+	foreach (TARGET_NAME ${TARGET_NAMES})
+		add_executable(${TARGET_NAME} tests/${TARGET_NAME}.c)
+		target_link_libraries(${TARGET_NAME} PRIVATE jwt)
+		target_link_libraries(${TARGET_NAME} PRIVATE ${CHECK_LINK_LIBRARIES})
+		target_include_directories(${TARGET_NAME} PRIVATE ${CHECK_INCLUDE_DIRS})
+		add_test(NAME ${TARGET_NAME} COMMAND ${TARGET_NAME})
+	endforeach()
+
+	if (ENABLE_COVERAGE)
+		set(CMAKE_BUILD_TYPE "Debug")
+		include(CodeCoverage)
+		append_coverage_compiler_flags()
+
+		setup_target_for_coverage_lcov(
+			NAME coverage
+			OUTPUT "${PROJECT_NAME}-${PROJECT_VERSION}-coverage"
+			TITLE "${PROJECT_NAME}-${PROJECT_VERSION} Code Coverage"
+			EXECUTABLE ctest -j ${PROCESSOR_COUNT}
+			DEPENDENCIES ${TARGET_NAMES}
+			EXCLUDE "tests/*" "**/ll.h" "/usr/**")
+	endif()
+endif()

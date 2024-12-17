@@ -9,7 +9,9 @@
 #ifndef JWT_PRIVATE_H
 #define JWT_PRIVATE_H
 
+#ifdef HAVE_CONFIG_H
 #include "config.h"
+#endif
 
 #include <jansson.h>
 #include <time.h>
@@ -85,6 +87,9 @@ extern struct jwt_crypto_ops jwt_openssl_ops;
 #endif
 #ifdef HAVE_GNUTLS
 extern struct jwt_crypto_ops jwt_gnutls_ops;
+#endif
+#ifdef HAVE_MBEDTLS
+extern struct jwt_crypto_ops jwt_mbedtls_ops;
 #endif
 
 /* Memory allocators. */
