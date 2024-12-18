@@ -13,14 +13,22 @@ find_package(PkgConfig REQUIRED)
 pkg_check_modules(JANSSON jansson>=2.0 REQUIRED)
 
 # Need at least one of these
+option(WITHOUT_OPENSSL "Disable using OpenSSL (default is auto detect)" OFF)
+option(WITHOUT_GNUTLS "Disable using GnuTLS (default is auto detect)" OFF)
+
+if (NOT WITHOUT_GNUTLS)
 pkg_check_modules(GNUTLS gnutls>=3.6.0)
+endif()
+if (NOT WITHOUT_OPENSSL)
 pkg_check_modules(OPENSSL openssl>=1.1.0)
+endif()
 
 # Tests and coverage depend on this, but optional
 pkg_check_modules(CHECK check>=0.9.4)
 
 add_library(jwt SHARED)
 add_library(jwt_static STATIC)
+set_target_properties(jwt_static PROPERTIES OUTPUT_NAME jwt)
 
 target_sources(jwt PRIVATE libjwt/jwt.c libjwt/jwks.c libjwt/base64.c)
 
@@ -89,6 +97,12 @@ install(TARGETS jwt
 	RUNTIME DESTINATION bin
 )
 
+# Install Static library
+install(TARGETS jwt_static
+        EXPORT ${LIBJWT_PROJECT}StaticTargets
+        ARCHIVE DESTINATION lib
+)
+
 install(EXPORT ${LIBJWT_PROJECT}Targets
 	FILE ${LIBJWT_PROJECT}Config.cmake
 	NAMESPACE ${LIBJWT_PROJECT}::
@@ -130,11 +144,19 @@ if (CHECK_FOUND)
 	endif()
 
 	foreach (TARGET_NAME ${TARGET_NAMES})
+		# Create target for each test
 		add_executable(${TARGET_NAME} tests/${TARGET_NAME}.c)
+
+		# Add main JWT library
 		target_link_libraries(${TARGET_NAME} PRIVATE jwt)
+
+		# Add CHECK deps
 		target_link_libraries(${TARGET_NAME} PRIVATE ${CHECK_LINK_LIBRARIES})
 		target_include_directories(${TARGET_NAME} PRIVATE ${CHECK_INCLUDE_DIRS})
-		add_test(NAME ${TARGET_NAME} COMMAND ${TARGET_NAME})
+
+		# Add test
+		add_test(NAME ${TARGET_NAME} COMMAND /bin/bash -c
+			"export TEST=${TARGET_NAME}; . ${CMAKE_SOURCE_DIR}/tests/test-env.sh; exec ./${TARGET_NAME}")
 	endforeach()
 
 	if (ENABLE_COVERAGE)
