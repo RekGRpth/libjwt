@@ -1,3 +1,11 @@
+# Copyright (C) 2015-2024 maClara, LLC <info@maclara-llc.com>
+# This file is part of the JWT C Library
+#
+# SPDX-License-Identifier:  MPL-2.0
+# This Source Code Form is subject to the terms of the Mozilla Public
+# License, v. 2.0. If a copy of the MPL was not distributed with this
+# file, You can obtain one at http://mozilla.org/MPL/2.0/.
+
 cmake_minimum_required (VERSION 3.7...3.15)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
@@ -144,11 +152,11 @@ if (DOXYGEN_FOUND)
 		"HAVE_DOT=YES"
 		"DOT_PATH=${DOXYGEN_DOT_EXECUTABLE}")
 
-	add_custom_target(doxygen-doc ALL
+	add_custom_target(doxygen-doc
 		COMMAND ${CMAKE_COMMAND} -E env
 			${DOXYGEN_ENV_VARS}
 			${DOXYGEN_EXECUTABLE}
-			${CMAKE_SOURCE_DIR}/doxygen.cfg
+			${CMAKE_SOURCE_DIR}/Doxyfile
 		COMMENT "Generating documentation with Doxygen"
 		VERBATIM
 	)
@@ -186,18 +194,21 @@ if (CHECK_FOUND)
 			"export TEST=${TEST}; . ${CMAKE_SOURCE_DIR}/tests/test-env.sh; exec ./${TEST}")
 	endforeach()
 
+	add_custom_target(check
+		COMMAND ${CMAKE_CTEST_COMMAND}
+		DEPENDS ${UNIT_TESTS})
+
 	if (ENABLE_COVERAGE)
 		set(CMAKE_BUILD_TYPE "Debug")
 		include(CodeCoverage)
 		append_coverage_compiler_flags()
 
+		set(COVERAGE_LCOV_INCLUDES "${CMAKE_SOURCE_DIR}/libjwt/*.c")
 		setup_target_for_coverage_lcov(
-			NAME coverage
+			NAME check-code-coverage
 			OUTPUT "${PROJECT_NAME}-${PROJECT_VERSION}-coverage"
 			TITLE "${PROJECT_NAME}-${PROJECT_VERSION} Code Coverage"
 			EXECUTABLE ctest -j ${PROCESSOR_COUNT}
-			DEPENDENCIES ${UNIT_TESTS}
-			LCOV_ARGS --ignore-errors unused,unused
-			EXCLUDE "tests/*" "**/ll.h" "/usr/**" "/opt/**")
+			DEPENDENCIES ${UNIT_TESTS})
 	endif()
 endif()

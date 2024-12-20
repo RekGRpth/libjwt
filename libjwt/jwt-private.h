@@ -1,4 +1,4 @@
-/* Copyright (C) 2015-2024 Ben Collins <bcollins@maclara-llc.com>
+/* Copyright (C) 2015-2024 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -52,7 +52,7 @@ struct jwt_valid {
 	time_t exp_leeway;
 	int hdr;
 	json_t *req_grants;
-	unsigned int status;
+	jwt_valid_exception_t status;
 };
 
 /* Yes, this is a bit of overhead, but it keeps me from having to

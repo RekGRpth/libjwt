@@ -1,12 +1,10 @@
 ![LibJWT - The C JWT Library](images/LibJWT-800x152.png)
 ---
 
-<a href="https://jwt.io/libraries#:~:text=/libjwt">
-<img alt="View on JWT.IO" align="right" src="http://jwt.io/img/badge.svg">
-</a>
-
 [![Build Status](https://app.travis-ci.com/benmcollins/libjwt.svg?branch=master)](https://app.travis-ci.com/github/benmcollins/libjwt)
 [![codecov](https://codecov.io/gh/benmcollins/libjwt/graph/badge.svg?token=MhCaZ8cpwQ)](https://codecov.io/gh/benmcollins/libjwt)
+
+[![maClara](https://img.shields.io/badge/Sponsored%20by-maClara%2C%20LLC-blue?style=plastic&logoColor=blue)](https://maclara-llc.com)
 
 ## Build Prerequisites
 
@@ -47,8 +45,8 @@ macOS, and Windows.
 - ``make``
 
 ### Common
-If you have *libcheck* installed, both targets will compile the test suite.
-You can use the ``check`` target on autoconf or the ``test`` target on cmake.
+If you have *libcheck* installed, both targets will compile the test suite
+which you can run using the ``check`` target.
 
 Both build systems will auto detect *OpenSSL* and *GnuTLS* and use one or both.
 Each build system has a way to force-enable (error if not found) or force-disable

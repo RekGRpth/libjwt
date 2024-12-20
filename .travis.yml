@@ -1,52 +1,46 @@
 language: c
 dist: jammy
-os:
-- linux
-arch:
-- amd64
-compiler:
-- gcc
+os: linux
+arch: amd64
+compiler: gcc
 
 .base_packages: &base_packages
 - libjansson-dev
 - libssl-dev
 - gnutls-dev
 - check
+- lcov
+- doxygen
+- graphviz
 
 addons:
   apt:
     packages:
     - *base_packages
 
-.autoconf_start: &autoconf_start
+.common_build: &common_build
 - set -e
 - autoreconf -fi
 - mkdir build
 - cd build
-- ../configure ${CONF_ARGS}
-- make check
-
-.cmake_start: &cmake_start
-- set -e
-- mkdir -p build
-- cd build
-- cmake ${CMAKE_ARGS} ..
-- make
-- make test
+- if [ -n "${CONF_ARGS}" ]; then ../configure ${CONF_ARGS}; fi
+- if [ -n "${CMAKE_ARGS}" ]; then cmake ${CMAKE_ARGS} ..; fi
+- make check-code-coverage
+- make doxygen-doc
 
 jobs:
   include:
     - name: "Build with CMake"
       env:
-      - CMAKE_ARGS="-DWITH_GNUTLS=1 -DWITH_OPENSSL=1"
+      - CMAKE_ARGS="-DWITH_GNUTLS=YES -DWITH_OPENSSL=YES -DENABLE_COVERAGE=YES"
       script:
-      - *cmake_start
+      - *common_build
 
     - name: "Build with Autotools"
       env:
-      - CONF_ARGS="--with-openssl --with-gnutls"
+      - CONF_ARGS="--with-openssl --with-gnutls --enable-code-coverage"
       script:
-      - *autoconf_start
+      - *common_build
 
     - name: "Unit Tests, Code Coverage, Memcheck"
       addons:
@@ -54,17 +48,13 @@ jobs:
           packages:
           - *base_packages
           - valgrind
-          - lcov
-          - doxygen
-          - graphviz
       before_install:
       - sudo pip install codecov
       env:
       - CONF_ARGS="--with-openssl --without-gnutls --enable-code-coverage --enable-valgrind"
       script:
-      - *autoconf_start
+      - *common_build
       - make check-valgrind
-      - make check-code-coverage
       - make dist-bzip2
       after_success:
       - codecov
