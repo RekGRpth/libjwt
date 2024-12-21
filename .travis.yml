@@ -1,63 +1,48 @@
 language: c
 dist: jammy
 os: linux
-arch: amd64
+arch:
+- amd64
+- arm64
 compiler: gcc
-
-.base_packages: &base_packages
-- libjansson-dev
-- libssl-dev
-- gnutls-dev
-- check
-- lcov
-- doxygen
-- graphviz
 
 addons:
   apt:
     packages:
-    - *base_packages
+    - libjansson-dev
+    - libssl-dev
+    - gnutls-dev
+    - check
+    - lcov
+    - doxygen
+    - graphviz
+    - valgrind
 
-.common_build: &common_build
-- set -e
+env:
+- CMD="cmake -DWITH_GNUTLS=YES -DWITH_OPENSSL=YES .."
+- CMD="../configure --with-openssl --with-gnutls"
+- CMD="../configure --without-gnutls --enable-code-coverage --enable-valgrind"
+
+before_install:
+- sudo pip install codecov
+
+before_script:
 - autoreconf -fi
 - mkdir build
 - cd build
-- if [ -n "${CONF_ARGS}" ]; then ../configure ${CONF_ARGS}; fi
-- if [ -n "${CMAKE_ARGS}" ]; then cmake ${CMAKE_ARGS} ..; fi
-- make check-code-coverage
-- make doxygen-doc
+
+script:
+- set -e
+- ${CMD}
+- if [[ "${CMD}" =~ "coverage" ]]; then make check-code-coverage; else make check; fi
+- if [[ "${CMD}" =~ "valgrind" ]]; then make check-valgrind; fi
+- if [[ "${CMD}" =~ "coverage" ]]; then make doxygen-doc; fi
+- if [[ "${CMD}" =~ "coverage" ]]; then make dist-bzip2; fi
 
 jobs:
-  include:
-    - name: "Build with CMake"
-      env:
-      - CMAKE_ARGS="-DWITH_GNUTLS=YES -DWITH_OPENSSL=YES -DENABLE_COVERAGE=YES"
-      script:
-      - *common_build
+  exclude:
+  - arch: arm64
+    env: CMD="../configure --without-gnutls --enable-code-coverage --enable-valgrind"
 
-    - name: "Build with Autotools"
-      env:
-      - CONF_ARGS="--with-openssl --with-gnutls --enable-code-coverage"
-      script:
-      - *common_build
-
-    - name: "Unit Tests, Code Coverage, Memcheck"
-      addons:
-        apt:
-          packages:
-          - *base_packages
-          - valgrind
-      before_install:
-      - sudo pip install codecov
-      env:
-      - CONF_ARGS="--with-openssl --without-gnutls --enable-code-coverage --enable-valgrind"
-      script:
-      - *common_build
-      - make check-valgrind
-      - make dist-bzip2
-      after_success:
-      - codecov
-
-# TODO https://docs.travis-ci.com/user/deployment-v2/providers/pages/
-# TODO https://docs.travis-ci.com/user/deployment-v2/providers/releases/
+after_success:
+- if [[ "${CMD}" =~ "coverage" ]]; then codecov; fi
