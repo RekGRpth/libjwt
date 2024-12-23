@@ -1,4 +1,9 @@
-dnl This sets it for Autconf and CMake
+dnl The use of m4_define here is to make it easy to parse by CMakeLists.txt.
+dnl That way there's one source for this info
+
+AC_PREREQ([2.61])
+
+dnl The library version
 m4_define([major_version], [2])
 m4_define([minor_version], [1])
 m4_define([micro_version], [0])
@@ -13,18 +18,27 @@ m4_define([so_revision],	[1])
 m4_define([so_age],		[11])
 m4_define([libjwt_version_info], [so_current:so_revision:so_age])
 
-m4_define([libjwt_project], [LibJWT])
+m4_define([libjwt_project],	[LibJWT])
+m4_define([libjwt_bugs],	[https://github.com/benmcollins/libjwt/issues])
+m4_define([libjwt_url],		[https://libjwt.io])
+m4_define([libjwt_brief],	[The C JSON Web Token Library +JWK +JWKS])
 
-AC_PREREQ([2.61])
-AC_INIT([libjwt_project],[libjwt_version],[https://github.com/benmcollins/libjwt/issues])
+AC_INIT([libjwt_project],
+	[libjwt_version],
+	[libjwt_bugs],
+	[],
+	[libjwt_url])
+
+AC_SUBST([LIBJWT_VERSION_INFO], [libjwt_version_info])
+AC_DEFINE([PACKAGE_DESCRIPTION], ["libjwt_brief"], [Description of this project])
+AC_SUBST([PACKAGE_DESCRIPTION], ["libjwt_brief"])
+
 AC_LANG([C])
 AM_INIT_AUTOMAKE([foreign subdir-objects dist-bzip2])
 LT_PREREQ([2.2])
 LT_INIT([])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_HEADERS([libjwt/config.h])
-
-AC_SUBST([libjwt_version_info], [libjwt_version_info])
 
 AC_SUBST([AM_CFLAGS], [-Wall])
 
@@ -98,6 +112,10 @@ PKG_CHECK_MODULES([CHECK], [check >= 0.9.4],
 
 AC_SUBST([RPMBUILD_OPTS],["$RPMB_OPENSSL $RPMB_GNUTLS $RPMB_CHECK"])
 
+dnl Check for compiler support flags
+AX_GCC_FUNC_ATTRIBUTE([deprecated])
+AX_GCC_FUNC_ATTRIBUTE([visibility])
+
 dnl Valgrind defaults
 AX_VALGRIND_DFLT([memcheck], [on])
 AX_VALGRIND_DFLT([helgrind], [off])
@@ -115,6 +133,7 @@ DX_RTF_FEATURE(OFF)
 DX_XML_FEATURE(OFF)
 DX_PDF_FEATURE(OFF)
 DX_PS_FEATURE(OFF)
+DX_ENV_APPEND(PROJECT_BRIEF, $PACKAGE_DESCRIPTION)
 DX_INIT_DOXYGEN($PACKAGE_NAME, Doxyfile)
 
 AC_CONFIG_FILES([
@@ -128,6 +147,7 @@ AC_CONFIG_FILES([
 	tests/Makefile
 	tests/keys/Makefile
 	tests/keys/jwks/Makefile
+	include/jwt_export.h
 ])
 
 AC_OUTPUT
