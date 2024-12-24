@@ -10,7 +10,7 @@ cmake_minimum_required (VERSION 3.7...3.15)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
 # Extract info from configure.ac
-include(AutoToolsVersion)
+include(LibJWTVersions)
 include(GenerateExportHeader)
 
 project(${LIBJWT_PROJECT}
@@ -23,7 +23,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
 # Find all the things we need for the library
 find_package(PkgConfig REQUIRED)
 
-pkg_check_modules(JANSSON jansson>=2.0 REQUIRED)
+pkg_check_modules(JANSSON jansson>=2.0 REQUIRED IMPORTED_TARGET)
 
 if (NOT DEFINED WITH_OPENSSL)
 	set(OPENSSL_AUTO TRUE)
@@ -36,56 +36,110 @@ option(WITH_GNUTLS "Whether to use GnuTLS (default is auto detect)" ON)
 
 # option(WITH_MBEDTLS "Enable using MBedTLS (default is disabled)" ON)
 
+option(WITH_EXAMPLES "Whether to build the example programs (default is OFF)" OFF)
+option(WITH_TESTS "Whether to build and run the testsuite (default is ON)" ON)
+
 # Need at least one of these
 if (WITH_GNUTLS)
 	if (NOT GNUTLS_AUTO)
 		set(GNUTLS_REQUIRED "REQUIRED")
 	endif()
-	pkg_check_modules(GNUTLS gnutls>=3.6.0 ${GNUTLS_REQUIRED})
+	pkg_check_modules(GNUTLS gnutls>=3.6.0 IMPORTED_TARGET
+			  ${GNUTLS_REQUIRED})
 endif()
 
 if (WITH_OPENSSL)
 	if (NOT OPENSSL_AUTO)
 		set(OPENSSL_REQUIRED "REQUIRED")
 	endif()
-	pkg_check_modules(OPENSSL openssl>=1.1.0 ${OPENSSL_REQUIRED})
+	pkg_check_modules(OPENSSL openssl>=1.1.0 IMPORTED_TARGET
+			  ${OPENSSL_REQUIRED})
 endif()
-
-# Tests and coverage depend on this, but optional
-pkg_check_modules(CHECK check>=0.9.4)
 
 add_library(jwt SHARED)
 add_library(jwt_static STATIC)
 set_target_properties(jwt_static PROPERTIES OUTPUT_NAME jwt)
 
-target_sources(jwt PRIVATE libjwt/jwt.c libjwt/jwks.c libjwt/base64.c)
+set(JWT_SOURCES libjwt/base64.c
+        libjwt/jwt-memory.c
+        libjwt/jwt.c
+        libjwt/jwks.c
+        libjwt/jwt-setget.c
+        libjwt/jwt-crypto-ops.c
+        libjwt/jwt-validate.c
+        libjwt/jwt-encode.c
+        libjwt/jwt-verify.c)
 
-generate_export_header(jwt)
+set(COMPILER_CONSTRUCTOR "__attribute__((constructor))")
+_check_c_compiler_attribute(${COMPILER_CONSTRUCTOR} COMPILER_HAS_CONSTRUCTOR)
+if (COMPILER_HAS_CONSTRUCTOR)
+	set(JWT_CUSTOM_CONTENT "\n#define JWT_CONSTRUCTOR ${COMPILER_CONSTRUCTOR}\n")
+else()
+	set(JWT_CUSTOM_CONTENT "\n#define JWT_CONSTRUCTOR\n")
+endif()
+generate_export_header(jwt
+	CUSTOM_CONTENT_FROM_VARIABLE JWT_CUSTOM_CONTENT)
 
-include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}
+		    ${CMAKE_SOURCE_DIR}/libjwt)
 
-target_link_libraries(jwt PUBLIC ${JANSSON_LINK_LIBRARIES})
-target_include_directories(jwt PUBLIC
-	${JANSSON_INCLUDE_DIRS})
+target_link_libraries(jwt PUBLIC PkgConfig::JANSSON)
+target_link_libraries(jwt_static PUBLIC PkgConfig::JANSSON)
 
 # Process the detected packages
 set(HAVE_CRYPTO FALSE)
 if (GNUTLS_FOUND)
 	set(HAVE_CRYPTO TRUE)
         add_definitions(-DHAVE_GNUTLS)
-	target_link_libraries(jwt PUBLIC ${GNUTLS_LINK_LIBRARIES})
-	target_include_directories(jwt PUBLIC
-		${GNUTLS_INCLUDE_DIRS})
-	target_sources(jwt PRIVATE libjwt/jwt-gnutls.c libjwt/jwks-gnutls.c)
+	target_link_libraries(jwt PUBLIC PkgConfig::GNUTLS)
+	target_link_libraries(jwt_static PUBLIC PkgConfig::GNUTLS)
+	list(APPEND JWT_SOURCES
+	     libjwt/gnutls/jwk-parse.c
+	     libjwt/gnutls/sign-verify.c)
 endif()
 
 if (OPENSSL_FOUND)
 	set(HAVE_CRYPTO TRUE)
 	add_definitions(-DHAVE_OPENSSL)
-	target_link_libraries(jwt PUBLIC ${OPENSSL_LINK_LIBRARIES})
-	target_include_directories(jwt PUBLIC
-		${OPENSSL_INCLUDE_DIRS})
-	target_sources(jwt PRIVATE libjwt/jwt-openssl.c libjwt/jwks-openssl.c)
+	target_link_libraries(jwt PUBLIC PkgConfig::OPENSSL)
+	target_link_libraries(jwt_static PUBLIC PkgConfig::OPENSSL)
+	list(APPEND JWT_SOURCES
+	     libjwt/openssl/jwk-parse.c
+	     libjwt/openssl/sign-verify.c)
+endif()
+
+function(jwt_add_extra)
+	set(oneValueArgs NAME SRC DIR)
+	cmake_parse_arguments(Extra "" "${oneValueArgs}" "" ${ARGN})
+
+	add_executable(${Extra_NAME} ${Extra_SRC})
+	target_link_libraries(${Extra_NAME} PRIVATE jwt)
+	set_target_properties(${Extra_NAME} PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY
+		"${CMAKE_BINARY_DIR}/${Extra_DIR}")
+endfunction()
+
+if (WITH_EXAMPLES)
+	jwt_add_extra(NAME jwtauth
+		      SRC examples/main-auth.c
+		      DIR examples)
+	jwt_add_extra(NAME jwtgen
+                      SRC examples/main-gen.c
+                      DIR examples)
+
+	jwt_add_extra(NAME jwt_to_pem
+                      SRC tests/keys/jwks/jwk_to_pem.c
+                      DIR tools)
+
+	if (OPENSSL_FOUND)
+		add_executable(pem_to_jwk tests/keys/jwks/pem_to_jwk.c)
+		# For now, this program uses some libjwt internals, so it
+		# has to link to the static library
+		target_link_libraries(pem_to_jwk PRIVATE jwt_static PkgConfig::OPENSSL)
+		set_target_properties(pem_to_jwk  PROPERTIES
+			RUNTIME_OUTPUT_DIRECTORY
+			"${CMAKE_BINARY_DIR}/tools")
+	endif()
 endif()
 
 # We need one of the things above to even work
@@ -93,14 +147,8 @@ if (NOT HAVE_CRYPTO)
 	message(FATAL_ERROR "No crypto support detected")
 endif()
 
-# Setup the static library by copying shared lib
-get_target_property(STATIC_LINK_LIBRARIES jwt LINK_LIBRARIES)
-get_target_property(STATIC_INCLUDE_DIRECTORIES jwt INCLUDE_DIRECTORIES)
-get_target_property(STATIC_SOURCES jwt SOURCES)
-
-target_sources(jwt_static PRIVATE ${STATIC_SOURCES})
-target_link_libraries(jwt_static PRIVATE ${STATIC_LINK_LIBRARIES})
-target_include_directories(jwt_static PRIVATE ${STATIC_INCLUDE_DIRECTORIES})
+target_sources(jwt PRIVATE ${JWT_SOURCES})
+target_sources(jwt_static PRIVATE ${JWT_SOURCES})
 
 target_include_directories(jwt PUBLIC
 	$<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/include>
@@ -120,6 +168,8 @@ add_definitions(-DKEYDIR=\"${CMAKE_SOURCE_DIR}/tests/keys\")
 install(FILES include/jwt.h
 	${CMAKE_BINARY_DIR}/jwt_export.h
 	DESTINATION include)
+install(FILES LICENSE README.md
+	DESTINATION ${CMAKE_INSTALL_PREFIX}/share/doc/${LIBJWT_PROJECT_LOWER})
 
 # Install library
 install(TARGETS jwt
@@ -135,44 +185,57 @@ install(TARGETS jwt_static
         ARCHIVE DESTINATION lib
 )
 
+# For cmake users
 install(EXPORT ${LIBJWT_PROJECT}Targets
 	FILE ${LIBJWT_PROJECT}Config.cmake
 	NAMESPACE ${LIBJWT_PROJECT}::
 	DESTINATION lib/cmake/${LIBJWT_PROJECT}
 )
 
-# We do this to make it compatible with autotools
-set(PACKAGE_NAME ${PROJECT_NAME})
-set(PACKAGE_VERSION ${PROJECT_VERSION})
-set(prefix ${CMAKE_INSTALL_PREFIX})
-string(JOIN " " JANSSON_LIBS ${JANSSON_LDFLAGS})
-string(JOIN " " OPENSSL_LIBS ${OPENSSL_LDFLAGS})
-string(JOIN " " GNUTLS_LIBS ${GNUTLS_LDFLAGS})
+# For pkg-config users
+unset(LIBJWT_LDFLAGS)
+foreach (FLAG ${JANSSON_LDFLAGS} ${OPENSSL_LDFLAGS} ${GNUTLS_LDFLAGS})
+	string(APPEND LIBJWT_LDFLAGS " " ${FLAG})
+endforeach()
+
 configure_file(libjwt/libjwt.pc.in libjwt.pc @ONLY)
-install(FILES ${CMAKE_BINARY_DIR}/libjwt.pc DESTINATION lib/pkgconfig)
+install(FILES ${CMAKE_BINARY_DIR}/libjwt.pc
+	DESTINATION lib/pkgconfig)
 
-find_package(Doxygen)
+find_package(Doxygen 1.12)
+
 if (DOXYGEN_FOUND)
-	set(DOXYGEN_ENV_VARS
-		"PROJECT=${PROJECT_NAME}"
-		"VERSION=${PROJECT_VERSION}"
-		"DOCDIR=${CMAKE_BINARY_DIR}/doxygen-doc"
-		"SRCDIR=${CMAKE_SOURCE_DIR}"
-		"PROJECT_BRIEF=${CMAKE_PROJECT_DESCRIPTION}"
-		"HAVE_DOT=YES"
-		"DOT_PATH=${DOXYGEN_DOT_EXECUTABLE}")
-
-	add_custom_target(doxygen-doc
-		COMMAND ${CMAKE_COMMAND} -E env
-			${DOXYGEN_ENV_VARS}
-			${DOXYGEN_EXECUTABLE}
-			${CMAKE_SOURCE_DIR}/Doxyfile
-		COMMENT "Generating documentation with Doxygen"
-		VERBATIM
-	)
+	set(DOXYGEN_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/doxygen-doc)
+	include(LibJWTDoxyfile)
+	doxygen_add_docs(doxygen-doc include/jwt.h)
 endif()
 
 option(ENABLE_COVERAGE "Enable code coverage rules" OFF)
+
+# Tests and coverage depend on this, but optional
+if (WITH_TESTS)
+	if (ENABLE_COVERAGE)
+		set(CHECK_REQUIRED "REQUIRED")
+	endif()
+	pkg_check_modules(CHECK check>=0.9.10 IMPORTED_TARGET ${CHECK_REQUIRED})
+else()
+	if (ENABLE_COVERAGE)
+		message(SEND_ERROR "You must set WITH_TESTS=ON to enable code coverage")
+	endif()
+endif()
+
+function(jwt_add_test)
+	set(oneValueArgs NAME)
+	cmake_parse_arguments(LibTest "" "${oneValueArgs}" "" ${ARGN})
+
+	jwt_add_extra(NAME ${LibTest_NAME}
+                      SRC tests/${LibTest_NAME}.c
+                      DIR tests)
+
+	target_link_libraries(${LibTest_NAME} PRIVATE PkgConfig::CHECK)
+	add_test(NAME ${LibTest_NAME} COMMAND /bin/bash -c
+		"export TEST=${LibTest_NAME}; . ${CMAKE_SOURCE_DIR}/tests/test-env.sh; exec ${CMAKE_BINARY_DIR}/tests/${LibTest_NAME}")
+endfunction()
 
 if (CHECK_FOUND)
 	include(CTest)
@@ -188,20 +251,7 @@ if (CHECK_FOUND)
 	endif()
 
 	foreach (TEST ${UNIT_TESTS})
-		# Create target for each test
-		add_executable(${TEST} tests/${TEST}.c)
-
-		# Add main JWT library
-		target_link_libraries(${TEST} PRIVATE jwt)
-
-		# Add CHECK deps
-		target_link_libraries(${TEST} PRIVATE ${CHECK_LINK_LIBRARIES})
-		target_include_directories(${TEST} PRIVATE ${CHECK_INCLUDE_DIRS})
-
-		# Add to test framework, making sure to set the environment
-		# for certain load-time tests.
-		add_test(NAME ${TEST} COMMAND /bin/bash -c
-			"export TEST=${TEST}; . ${CMAKE_SOURCE_DIR}/tests/test-env.sh; exec ./${TEST}")
+		jwt_add_test(NAME ${TEST})
 	endforeach()
 
 	add_custom_target(check
@@ -221,4 +271,11 @@ if (CHECK_FOUND)
 			EXECUTABLE ctest -j ${PROCESSOR_COUNT}
 			DEPENDENCIES ${UNIT_TESTS})
 	endif()
+else()
+	if (ENABLE_COVERAGE)
+		message(SEND_ERROR "Coverage enabled, but did not find check library")
+	endif()
 endif()
+
+set(CPACK_PROPERTIES_FILE "${CMAKE_SOURCE_DIR}/cmake/CPackConfig.cmake")
+include(CPack)

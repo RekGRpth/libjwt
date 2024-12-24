@@ -21,38 +21,33 @@ before_install:
 
 before_script:
 - set -ev
-- autoreconf --version
-- autoreconf -fi
 - mkdir build
 - cd build
 
+after_script:
+- make install DESTDIR=`pwd`/root
+- find root -type f -ls
+
 jobs:
   include:
-    - name: "Autotools Build (focal)"
-      env: BUILD=auto
+    - name: "Focal"
       dist: focal
       script:
-      - ../configure
+      - cmake -DWITH_GNUTLS=YES -DWITH_OPENSSL=YES -DWITH_TESTS=NO -DENABLE_COVERAGE=NO ..
       - make
 
-    - name: "CMake Build"
-      env: BUILD=cmake
+    - name: "Jammy"
       dist: jammy
       script:
-      - cmake -DWITH_GNUTLS=YES -DWITH_OPENSSL=YES ..
-      - make check
-
-    - name: "Autotools Build"
-      env: BUILD=auto
-      dist: jammy
-      script:
-      - ../configure --with-openssl --with-gnutls
+      - cmake -DWITH_GNUTLS=YES -DWITH_OPENSSL=YES -DWITH_TESTS=YES ..
       - make check
 
     - name: "Coverage Build"
-      env: BUILD=coverage
       dist: jammy
       script:
-      - ../configure --without-gnutls --enable-code-coverage --enable-valgrind
-      - make check-valgrind check-code-coverage
+      - cmake -DWITH_GNUTLS=NO -DWITH_OPENSSL=YES -DENABLE_COVERAGE=ON ..
+      - make
+      - ctest -T memcheck
+      - make package_source
+      - make check-code-coverage
       - codecov
