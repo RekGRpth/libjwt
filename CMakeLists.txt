@@ -9,7 +9,6 @@
 cmake_minimum_required (VERSION 3.7...3.15)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake")
 
-# Extract info from configure.ac
 include(LibJWTVersions)
 include(GenerateExportHeader)
 
@@ -19,6 +18,9 @@ project(${LIBJWT_PROJECT}
 	HOMEPAGE_URL ${LIBJWT_HOMEPAGE_URL}
 	LANGUAGES C)
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall")
+
+# Must be set after the above
+include(GNUInstallDirs)
 
 # Find all the things we need for the library
 find_package(PkgConfig REQUIRED)
@@ -168,29 +170,29 @@ add_definitions(-DKEYDIR=\"${CMAKE_SOURCE_DIR}/tests/keys\")
 # Install header
 install(FILES include/jwt.h
 	${CMAKE_BINARY_DIR}/jwt_export.h
-	DESTINATION include)
+	DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 install(FILES LICENSE README.md
-	DESTINATION ${CMAKE_INSTALL_PREFIX}/share/doc/${LIBJWT_PROJECT_LOWER})
+	DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 # Install library
 install(TARGETS jwt
 	EXPORT ${LIBJWT_PROJECT}Targets
-	ARCHIVE DESTINATION lib
-	LIBRARY DESTINATION lib
-	RUNTIME DESTINATION bin
+	ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+	LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+	RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
 # Install Static library
 install(TARGETS jwt_static
         EXPORT ${LIBJWT_PROJECT}StaticTargets
-        ARCHIVE DESTINATION lib
+	ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
 )
 
 # For cmake users
 install(EXPORT ${LIBJWT_PROJECT}Targets
 	FILE ${LIBJWT_PROJECT}Config.cmake
 	NAMESPACE ${LIBJWT_PROJECT}::
-	DESTINATION lib/cmake/${LIBJWT_PROJECT}
+	DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/${LIBJWT_PROJECT}
 )
 
 # For pkg-config users
@@ -201,9 +203,9 @@ endforeach()
 
 configure_file(libjwt/libjwt.pc.in libjwt.pc @ONLY)
 install(FILES ${CMAKE_BINARY_DIR}/libjwt.pc
-	DESTINATION lib/pkgconfig)
+	DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
-find_package(Doxygen 1.12)
+find_package(Doxygen 1.9)
 
 if (DOXYGEN_FOUND)
 	set(DOXYGEN_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/doxygen-doc)

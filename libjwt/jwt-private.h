@@ -28,6 +28,7 @@
 #  endif
 #endif
 
+JWT_NO_EXPORT
 extern struct jwt_crypto_ops *jwt_ops;
 
 #define jwks_write_error(__obj, __fmt, __args...)		\
@@ -128,11 +129,11 @@ void *jwt_base64uri_decode(const char *src, int *ret_len);
 
 /* JSON stuff */
 JWT_NO_EXPORT
-const char *get_js_string(json_t *js, const char *key);
+const char *get_js_string(const json_t *js, const char *key);
 JWT_NO_EXPORT
-long get_js_int(json_t *js, const char *key);
+long get_js_int(const json_t *js, const char *key);
 JWT_NO_EXPORT
-int get_js_bool(json_t *js, const char *key);
+int get_js_bool(const json_t *js, const char *key);
 
 /* A time-safe strcmp function */
 JWT_NO_EXPORT
