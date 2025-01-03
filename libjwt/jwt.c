@@ -124,15 +124,95 @@ jwt_alg_t jwt_str_alg(const char *alg)
 
 void jwt_scrub_key(jwt_t *jwt)
 {
-	if (jwt->key) {
+	if (jwt->config.key) {
 		/* Overwrite it so it's gone from memory. */
-		memset(jwt->key, 0, jwt->key_len);
+		memset(jwt->config.key, 0, jwt->config.key_len);
 
-		jwt_freemem(jwt->key);
+		jwt_freemem(jwt->config.key);
 	}
 
-	jwt->key_len = 0;
+	/* We do not claim to handle memory for this */
+	jwt->config.jw_key = NULL;
+
+	jwt->config.key_len = 0;
 	jwt->alg = JWT_ALG_NONE;
+}
+
+jwt_t *jwt_create(jwt_config_t *config)
+{
+	jwt_t *new = NULL;
+	jwt_alg_t alg = config->alg;
+	int ret;
+
+	/* We require a config, otherwise call jwt_new() */
+	if (config == NULL) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	/* Make sure alg is sane */
+	if (alg < JWT_ALG_NONE || alg >= JWT_ALG_INVAL) {
+		errno = EINVAL;
+		return NULL;
+	}
+
+	/* If we have a jwt_item_t, make sure either the config or the key
+	 * has an alg, and sync them up. */
+        if (alg == JWT_ALG_NONE && config && config->jw_key) {
+		if (config->jw_key->alg == JWT_ALG_NONE) {
+			/* Invalid request */
+			errno = EINVAL;
+			return NULL;
+		}
+		alg = config->jw_key->alg;
+	}
+
+	if (alg == JWT_ALG_NONE) {
+		/* NONE should not have any keys */
+		if (config->jw_key || config->key || config->key_len) {
+	                errno = EINVAL;
+			return NULL;
+		}
+	} else {
+		if (config->jw_key) {
+			if (config->key || config->key_len) {
+				/* Cannot have both key and jw_key */
+				errno = EINVAL;
+				return NULL;
+			}
+			if (config->jw_key->alg != JWT_ALG_NONE &&
+			    alg != config->jw_key->alg) {
+				/* Mismatch */
+				errno = EINVAL;
+				return NULL;
+			}
+		} else if (!config->key || !config->key_len) {
+			/* Must have both of these */
+			errno = EINVAL;
+			return NULL;
+		}
+	}
+
+	ret = jwt_new(&new);
+	if (ret)
+		return NULL;
+
+	if (config->key) {
+		new->config.key_len = config->key_len;
+		new->config.key = jwt_malloc(new->config.key_len);
+		if (new->config.key == NULL) {
+			errno = ENOMEM;
+			jwt_freep(&new);
+		} else {
+			memcpy(new->config.key, config->key, config->key_len);
+		}
+	} else {
+		new->config.jw_key = config->jw_key;
+	}
+
+	new->alg = alg;
+
+	return new;
 }
 
 int jwt_set_alg(jwt_t *jwt, jwt_alg_t alg, const unsigned char *key, int len)
@@ -153,15 +233,15 @@ int jwt_set_alg(jwt_t *jwt, jwt_alg_t alg, const unsigned char *key, int len)
 		if (!key || len <= 0)
 			return EINVAL;
 
-		jwt->key = jwt_malloc(len);
-		if (!jwt->key)
+		jwt->config.key = jwt_malloc(len);
+		if (!jwt->config.key)
 			return ENOMEM; // LCOV_EXCL_LINE
 
-		memcpy(jwt->key, key, len);
+		memcpy(jwt->config.key, key, len);
 	}
 
 	jwt->alg = alg;
-	jwt->key_len = len;
+	jwt->config.key_len = len;
 
 	return 0;
 }
@@ -240,17 +320,20 @@ jwt_t *jwt_dup(jwt_t *jwt)
 
 	memset(new, 0, sizeof(jwt_t));
 
-	if (jwt->key_len) {
+	/* We do not claim to handle memory for this */
+	new->config.jw_key = jwt->config.jw_key;
+
+	if (jwt->config.key_len) {
 		new->alg = jwt->alg;
-		new->key = jwt_malloc(jwt->key_len);
-		if (!new->key) {
+		new->config.key = jwt_malloc(jwt->config.key_len);
+		if (!new->config.key) {
 			// LCOV_EXCL_START
 			errno = ENOMEM;
 			goto dup_fail;
 			// LCOV_EXCL_STOP
 		}
-		memcpy(new->key, jwt->key, jwt->key_len);
-		new->key_len = jwt->key_len;
+		memcpy(new->config.key, jwt->config.key, jwt->config.key_len);
+		new->config.key_len = jwt->config.key_len;
 	}
 
 	new->grants = json_deep_copy(jwt->grants);

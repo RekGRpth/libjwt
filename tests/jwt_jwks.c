@@ -11,35 +11,93 @@
 #define JWKS_KEY_TEST(__name)				\
 START_TEST(test_jwks_##__name)				\
 {							\
-	SET_OPS_JWK();					\
+	SET_OPS();					\
        __jwks_check(#__name ".json", #__name ".pem");	\
 }							\
 END_TEST
 
 static void __jwks_check(const char *json, const char *pem)
 {
+	JWT_CONFIG_DECLARE(config);
 	jwk_set_t *jwk_set = NULL;
-	jwk_item_t *item;
-	int strcmp_ret;
+	jwt_t *jwt = NULL;
+	jwk_item_t *item = NULL;
+	char *out = NULL;
+	int ret;
 
+	/* Load up the JWKS */
 	read_key(json);
 	jwk_set = jwks_create(t_config.key);
 	free_key();
 	ck_assert_ptr_nonnull(jwk_set);
 
 	ck_assert(!jwks_error(jwk_set));
+
+	/* Make sure we have one item */
 	item = jwks_item_get(jwk_set, 0);
 	ck_assert_ptr_nonnull(item);
+
+	/* If the key is not any provider, we need ops support. */
+	if (item->provider != JWT_CRYPTO_OPS_ANY &&
+	    !jwt_crypto_ops_supports_jwk()) {
+		ck_assert(item->error);
+		return;
+	}
+
 	ck_assert(!item->error);
 
-	read_key(pem);
-	strcmp_ret = strcmp(item->pem, t_config.key);
-	free_key();
-	ck_assert_int_eq(strcmp_ret, 0);
+	/* Load our PEM to compare */
+	if (item->kty != JWK_KEY_TYPE_OCT) {
+		read_key(pem);
+		ret = strcmp(item->pem, t_config.key);
+		free_key();
+		ck_assert_int_eq(ret, 0);
+	}
 
+	/* Should only be one key in the set */
 	item = jwks_item_get(jwk_set, 1);
 	ck_assert_ptr_null(item);
 
+	/* Now create a token */
+	item = jwks_item_get(jwk_set, 0);
+	ck_assert_ptr_nonnull(item);
+
+	if (!item->is_private_key)
+		return;
+
+	if (item->alg == JWT_ALG_NONE && item->kty == JWK_KEY_TYPE_RSA) {
+		/* "alg" is optional, and it's missing in a few keys */
+		config.alg = JWT_ALG_RS256;
+	}
+
+	/* Use our JWK */
+	config.jw_key = item;
+	jwt = jwt_create(&config);
+	ck_assert_ptr_nonnull(jwt);
+
+	/* Add some grants */
+	ret = jwt_add_grant(jwt, "iss", "files.maclara-llc.com");
+        ck_assert_int_eq(ret, 0);
+
+        ret = jwt_add_grant(jwt, "sub", "user0");
+        ck_assert_int_eq(ret, 0);
+
+        ret = jwt_add_grant(jwt, "ref", "XXXX-YYYY-ZZZZ-AAAA-CCCC");
+        ck_assert_int_eq(ret, 0);
+
+        ret = jwt_add_grant_int(jwt, "iat", TS_CONST);
+        ck_assert_int_eq(ret, 0);
+
+	/* Encode it */
+        out = jwt_encode_str(jwt);
+        ck_assert_ptr_ne(out, NULL);
+
+	/* Verify it using our JWK */
+        __verify_jwk(out, item);
+
+        jwt_free_str(out);
+
+        jwt_free(jwt);
         jwks_free(jwk_set);
 }
 
@@ -51,17 +109,25 @@ JWKS_KEY_TEST(ec_key_secp384r1);
 JWKS_KEY_TEST(ec_key_secp384r1_pub);
 JWKS_KEY_TEST(ec_key_secp521r1);
 JWKS_KEY_TEST(ec_key_secp521r1_pub);
+
 JWKS_KEY_TEST(eddsa_key_ed25519);
 JWKS_KEY_TEST(eddsa_key_ed25519_pub);
+
 JWKS_KEY_TEST(rsa_key_2048);
 JWKS_KEY_TEST(rsa_key_2048_pub);
 JWKS_KEY_TEST(rsa_key_4096);
 JWKS_KEY_TEST(rsa_key_4096_pub);
 JWKS_KEY_TEST(rsa_key_8192);
 JWKS_KEY_TEST(rsa_key_8192_pub);
+
 JWKS_KEY_TEST(rsa_key_i37_pub);
+
 JWKS_KEY_TEST(rsa_pss_key_2048);
 JWKS_KEY_TEST(rsa_pss_key_2048_pub);
+
+JWKS_KEY_TEST(oct_key_256);
+JWKS_KEY_TEST(oct_key_384);
+JWKS_KEY_TEST(oct_key_512);
 
 START_TEST(test_jwks_keyring_load)
 {
@@ -81,7 +147,7 @@ START_TEST(test_jwks_keyring_load)
 	for (i = 0; (item = jwks_item_get(jwk_set, i)); i++)
 		ck_assert(!item->error);
 
-	ck_assert_int_eq(i, 19);
+	ck_assert_int_eq(i, 22);
 
 	ck_assert(jwks_item_free(jwk_set, 3));
 
@@ -173,17 +239,25 @@ static Suite *libjwt_suite(const char *title)
 	tcase_add_loop_test(tc_core, test_jwks_ec_key_secp384r1_pub, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_ec_key_secp521r1, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_ec_key_secp521r1_pub, 0, i);
+
 	tcase_add_loop_test(tc_core, test_jwks_eddsa_key_ed25519, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_eddsa_key_ed25519_pub, 0, i);
+
 	tcase_add_loop_test(tc_core, test_jwks_rsa_key_2048, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_rsa_key_2048_pub, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_rsa_key_4096, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_rsa_key_4096_pub, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_rsa_key_8192, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_rsa_key_8192_pub, 0, i);
+
 	tcase_add_loop_test(tc_core, test_jwks_rsa_key_i37_pub, 0, i);
+
 	tcase_add_loop_test(tc_core, test_jwks_rsa_pss_key_2048, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_rsa_pss_key_2048_pub, 0, i);
+
+	tcase_add_loop_test(tc_core, test_jwks_oct_key_256, 0, i);
+	tcase_add_loop_test(tc_core, test_jwks_oct_key_384, 0, i);
+	tcase_add_loop_test(tc_core, test_jwks_oct_key_512, 0, i);
 
 	/* Load a whole keyring of all of the above. */
 	tcase_add_loop_test(tc_core, test_jwks_keyring_load, 0, i);

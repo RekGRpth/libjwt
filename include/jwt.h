@@ -105,6 +105,7 @@ typedef enum {
 	JWT_CRYPTO_OPS_OPENSSL,		/**< OpenSSL Library */
 	JWT_CRYPTO_OPS_GNUTLS,		/**< GnuTLS Library */
 	JWT_CRYPTO_OPS_MBEDTLS,		/**< MBedTLS embedded library */
+	JWT_CRYPTO_OPS_ANY,		/**< Used internally for hmac keys */
 } jwt_crypto_provider_t;
 
 /** @ingroup jwks_core_grp
@@ -113,12 +114,14 @@ typedef enum {
  * Corresponds to the ``"kty"`` attribute of the JWK.
  *
  * @rfc{7517,4.1}
+ * @rfc(7518,6.1}
  */
 typedef enum {
 	JWK_KEY_TYPE_NONE = 0,		/**< Unused on valid keys */
 	JWK_KEY_TYPE_EC,		/**< Eliptic Curve keys */
 	JWK_KEY_TYPE_RSA,		/**< RSA keys (RSA and RSA-PSS) */
 	JWK_KEY_TYPE_OKP,		/**< Octet Key Pair (e.g. EDDSA) */
+	JWK_KEY_TYPE_OCT,		/**< Octet sequence (e.g. HS256) */
 } jwk_key_type_t;
 
 /** @ingroup jwks_core_grp
@@ -141,7 +144,7 @@ typedef enum {
  * names correspond with the RFC.
  *
  * @code
- * if (@ref jwt_item_t.key_ops & (JWK_KEY_OP_SIGN | JWK_KEY_OP_ENCRYPT)) {
+ * if (@ref jwk_item_t.key_ops & (JWK_KEY_OP_SIGN | JWK_KEY_OP_ENCRYPT)) {
  *     ...
  * }
  * @endcode
@@ -174,22 +177,29 @@ typedef enum {
  *  a nil terminated string of the key. The underlying crypto algorith may
  *  or may not support this. It's provided as a convenience.
  *
- * @raisewarning Decide if we need to make this an opaque object
+ * @raisewarning Decide if we need to make this an opaque object. Also, about that JSON...
  */
 typedef struct {
-	jwk_key_type_t kty;	/**< The key type of this key					*/
-	char *pem;		/**< If not NULL, contains PEM string of this key		*/
-	jwt_crypto_provider_t provider; /**< Crypto provider that owns this key			*/
-	void *provider_data;	/**< Internal data used by the provider				*/
-	int is_private_key;	/**< Whether this is a public or private key			*/
-	char curve[256];	/**< Curve name of an ``"EC"`` or ``"OKP"`` key			*/
-	size_t bits;		/**< The number of bits in the key (may be 0)			*/
-	int error;		/**< Shows there is an error present in this key (unusable)	*/
-	char error_msg[256];	/**< Descriptive message for @ref jwk_item_t.error		*/
-	jwk_pub_key_use_t use;	/**< Value of the JWK ``"use"`` attribute			*/
-	jwk_key_op_t key_ops;	/**< Bitwise flags of ``"key_ops"`` supported for this key	*/
-	jwt_alg_t alg;		/**< Valid ``"alg"`` that this key can be used for		*/
-	char *kid;		/**< @rfc{7517,4.5}						*/
+	char *pem;		/**< If not NULL, contains PEM string of this key	*/
+	jwt_crypto_provider_t provider; /**< Crypto provider that owns this key         */
+	union {
+		void *provider_data;	/**< Internal data used by the provider		*/
+		struct {
+			void *key;
+			size_t len;
+		} oct;
+	};
+	int is_private_key;	/**< Whether this is a public or private key            */
+	char curve[256];        /**< Curve name of an ``"EC"`` or ``"OKP"`` key         */
+	size_t bits;            /**< The number of bits in the key (may be 0)           */
+	int error;              /**< There was an error parsgint this key (unusable)    */
+	char error_msg[256];    /**< Descriptive message for @ref jwk_item_t.error      */
+	jwk_key_type_t kty;     /**< @rfc{7517,4.1} The key type of this key            */
+	jwk_pub_key_use_t use;  /**< @rfc{7517,4.2} How this key can be used            */
+	jwk_key_op_t key_ops;   /**< @rfc{7517,4.3} Key operations supported            */
+	jwt_alg_t alg;          /**< @rfc{7517,4.4} JWA Algorithm supported             */
+	char *kid;              /**< @rfc{7517,4.5} Key ID                              */
+	const char *json;       /**< The entire JSON string for this key                */
 } jwk_item_t;
 
 /** @ingroup jwt_valid_grp
@@ -336,6 +346,7 @@ typedef struct {
 		size_t key_len;		/**< Length of key material	*/
 		JWT_DEPRECATED int jwt_key_len;
 	};
+	jwk_item_t *jw_key;		/**< A JWK to use for key	*/
 	jwt_alg_t alg;			/**< For algorithm matching	*/
 	void *ctx;			/**< User controlled context	*/
 } jwt_config_t;
@@ -376,7 +387,7 @@ void jwt_config_init(jwt_config_t *config);
  * @endcode
  */
 #define JWT_CONFIG_DECLARE(__name) \
-	jwt_config_t __name = { { NULL }, { 0 }, JWT_ALG_NONE, NULL}
+	jwt_config_t __name = { { NULL }, { 0 }, NULL, JWT_ALG_NONE, NULL}
 
 /**
  * @brief Callback for operations involving verification of tokens.
@@ -404,7 +415,53 @@ typedef int (*jwt_callback_t)(const jwt_t *, jwt_config_t *);
  */
 
 /**
+ * @defgroup jwt_create_grp Create a JWT
+ * @{
+ */
+
+/**
+ * @brief Initial function to create a new JWT
+ *
+ * @raisewarning Complete documentation of jwt_create
+ */
+JWT_EXPORT
+jwt_t *jwt_create(jwt_config_t *config);
+
+/**
+ * @}
+ * @noop jwt_create_grp
+ */
+
+/**
  * @defgroup jwt_verify_grp Token Verification
+ *
+ * @raisewarning Complete the details of this information
+ *
+ * Lots of cases to deal with.
+ *
+ * -# If the caller passes a key/len pair:
+ *    - Then config.alg MUST NOT be none, and
+ *    - The config.alg MUST match jwt.alg
+ * -# If the user passes a jw_key:
+ *    - config.alg is not used (jw_key.alg is used if available)
+ *    - It's valid for jw_key.alg to be none (missing) (RFC-7517:4.4)
+ *    - If jw_key.alg is not none, it MUST match the JWT
+ *    - If jw_key.alg is none, then jwt.alg is compared against jwk.kty for
+ *      compatibility. e.g:
+ *      - jwt.alg RS256, RS384, and RS512 are suitable with jwk.kty RSA
+ *      - jwt.alg ES384 is not suitable with jwk.kty OKP
+ * -# The user SHOULD NOT pass both types, but we allow it. However,
+ *    checks for both keys MUST pass.
+ * -# If the user did not pass a key of any kind:
+ *    - Then jwt.alg MUST be none, and
+ *    - The sig_len MUST be zero
+ *    - If the caller wishes to "peek" at a JWA token, (without verifying)
+ *      then they MUST use a callback function to inspect it. Information
+ *      from the callback can be passed between the cb and original caller
+ *      with the @ref jwt_config_t.ctx pointer.
+ * -# If jwt.alg is none then sig_len MUST be zero, regardless of (4)
+ *
+ *
  * @{
  */
 
@@ -416,7 +473,7 @@ typedef int (*jwt_callback_t)(const jwt_t *, jwt_config_t *);
  * @param jwt Pointer to a JWT object pointer
  * @param token Pointer to a nil terminated JWT string
  * @param config Pointer to a config structure to define how to verify the
- *   token
+ *   token. This can be NULL, in which case the token is simply decoded.
  * @return 0 on success, or an errno. On success, jwt will be allocated
  */
 JWT_EXPORT
@@ -432,10 +489,12 @@ int jwt_verify(jwt_t **jwt, const char *token, jwt_config_t *config);
  *
  * @raisewarning Complete documentation of jwt_verify_wcb
  *
+ * NOTE About NULL config and non-NULL cb and vice-a-versa
+ *
  * @param jwt Pointer to a JWT object pointer
  * @param token Pointer to a nil terminated JWT string
  * @param config Pointer to a config structure to define how to verify the
- *   token
+ *   token. This can be NULL, in which case the token is simply decoded.
  * @param cb Pointer to a callback
  * @return 0 on success, or an errno. On success, jwt will be allocated
  */
@@ -1117,8 +1176,21 @@ jwk_item_t *jwks_item_get(jwk_set_t *jwk_set, size_t index);
 JWT_EXPORT
 void jwks_free(jwk_set_t *jwk_set);
 
+#if defined(__GNUC__) || defined(__clang__)
 /**
- * Free all memory associated with the nth jwt_item_t in a jwk_set
+ * @raisewarning Document jwks_freep
+ */
+static inline void jwks_freep(jwk_set_t **jwks) {
+	if (jwks) {
+		jwks_free(*jwks);
+		*jwks = NULL;
+	}
+}
+#define jwks_auto_t jwk_set_t __attribute__((cleanup(jwks_freep)))
+#endif
+
+/**
+ * Free all memory associated with the nth jwk_item_t in a jwk_set
  *
  * @param jwk_set A JWKS object
  * @param index the position of the item in the index
@@ -1128,8 +1200,8 @@ JWT_EXPORT
 int jwks_item_free(jwk_set_t *jwk_set, size_t index);
 
 /**
- * Free all memory associated with alljwt_item_t in a jwk_set. The
- * jwk_set becomes an empty set.
+ * Free all memory associated with all @ref jwk_item_t in a @ref jwk_set_t.
+ * The jwk_set_t becomes an empty set.
  *
  * @param jwk_set A JWKS object
  * @return The numbner of items deleted
