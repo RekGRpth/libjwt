@@ -185,7 +185,7 @@ static jwk_item_t *jwk_process_one(jwk_set_t *jwk_set, json_t *jwk)
 	return item;
 }
 
-jwk_item_t *jwks_item_get(jwk_set_t *jwk_set, size_t index)
+const jwk_item_t *jwks_item_get(const jwk_set_t *jwk_set, size_t index)
 {
 	struct jwk_list_item *item = NULL;
 	int i = 0;
@@ -199,20 +199,78 @@ jwk_item_t *jwks_item_get(jwk_set_t *jwk_set, size_t index)
 	return NULL;
 }
 
+int jwks_item_is_private(const jwk_item_t *item)
+{
+	return item->is_private_key ? 1 : 0;
+}
+
+int jwks_item_error(const jwk_item_t *item)
+{
+	return item->error;
+}
+
+const char *jwks_item_error_msg(const jwk_item_t *item)
+{
+	return item->error_msg;
+}
+
+const char *jwks_item_curve(const jwk_item_t *item)
+{
+	return item->curve[0] ? item->curve : NULL;
+}
+
+const char *jwks_item_kid(const jwk_item_t *item)
+{
+	return item->kid[0] ? item->kid : NULL;
+}
+
+jwt_alg_t jwks_item_alg(const jwk_item_t *item)
+{
+	return item->alg;
+}
+
+jwk_key_type_t jwks_item_kty(const jwk_item_t *item)
+{
+	return item->kty;
+}
+
+jwk_pub_key_use_t jwks_item_use(const jwk_item_t *item)
+{
+	return item->use;
+}
+
+jwk_key_op_t jwks_item_key_ops(const jwk_item_t *item)
+{
+	return item->key_ops;
+}
+
+const char *jwks_item_pem(const jwk_item_t *item)
+{
+	return item->pem;
+}
+
+int jwks_item_key_bits(const jwk_item_t *item)
+{
+	return item->bits;
+}
+
 int jwks_error(jwk_set_t *jwk_set)
 {
 	return jwk_set->error ? 1 : 0;
 }
 
-const char *jwks_error_msg(jwk_set_t *jwk_set)
+const char *jwks_error_msg(const jwk_set_t *jwk_set)
 {
-	if (jwk_set == NULL)
-		return "Unknown error";
-
 	return jwk_set->error_msg;
 }
 
-int jwks_item_add(jwk_set_t *jwk_set, jwk_item_t *item)
+void jwks_error_clear(jwk_set_t *jwk_set)
+{
+	jwk_set->error = 0;
+	memset(jwk_set->error_msg, 0, sizeof(jwk_set->error_msg));
+}
+
+static int jwks_item_add(jwk_set_t *jwk_set, jwk_item_t *item)
 {
 	struct jwk_list_item *new;
 
@@ -225,12 +283,12 @@ int jwks_item_add(jwk_set_t *jwk_set, jwk_item_t *item)
 
 	new->item = item;
 
-	list_add(&new->node, &jwk_set->head);
+	list_add_tail(&new->node, &jwk_set->head);
 
 	return 0;
 }
 
-int jwks_item_free(jwk_set_t *jwk_set, size_t index)
+int jwks_item_free(jwk_set_t *jwk_set, const size_t index)
 {
 	struct jwk_list_item *list_item = NULL, *todel = NULL;
 	jwk_item_t *item;
@@ -332,17 +390,19 @@ static jwk_set_t *jwks_process(jwk_set_t *jwk_set, json_t *j_all, json_error_t *
 
         return jwk_set;
 }
+
 #define __FLAG_EMPTY	(void *)0xfffff00d
-jwk_set_t *jwks_create_strlen(const char *jwk_json_str, const size_t len)
+jwk_set_t *jwks_load_strb(jwk_set_t *jwk_set, const char *jwk_json_str,
+			    const size_t len)
 {
 	json_auto_t *j_all = NULL;
 	json_error_t error;
-	jwk_set_t *jwk_set;
 
 	if (jwk_json_str == NULL)
 		return NULL;
 
-	jwk_set = jwks_new();
+	if (jwk_set == NULL)
+		jwk_set = jwks_new();
 	if (jwk_set == NULL)
 		return NULL;
 
@@ -356,7 +416,7 @@ jwk_set_t *jwks_create_strlen(const char *jwk_json_str, const size_t len)
 	return jwks_process(jwk_set, j_all, &error);
 }
 
-jwk_set_t *jwks_create(const char *jwk_json_str)
+jwk_set_t *jwks_load(jwk_set_t *jwk_set, const char *jwk_json_str)
 {
 	const char *real_str = jwk_json_str;
 	size_t len;
@@ -368,19 +428,19 @@ jwk_set_t *jwks_create(const char *jwk_json_str)
 		len = strlen(real_str);
 	}
 
-	return jwks_create_strlen(real_str, len);
+	return jwks_load_strb(jwk_set, real_str, len);
 }
 
-jwk_set_t *jwks_create_fromfile(const char *file_name)
+jwk_set_t *jwks_load_fromfile(jwk_set_t *jwk_set, const char *file_name)
 {
 	json_auto_t *j_all = NULL;
 	json_error_t error;
-	jwk_set_t *jwk_set;
 
 	if (file_name == NULL)
 		return NULL;
 
-	jwk_set = jwks_new();
+	if (jwk_set == NULL)
+		jwk_set = jwks_new();
 	if (jwk_set == NULL)
 		return NULL;
 
@@ -390,16 +450,16 @@ jwk_set_t *jwks_create_fromfile(const char *file_name)
 	return jwks_process(jwk_set, j_all, &error);
 }
 
-jwk_set_t *jwks_create_fromfp(FILE *input)
+jwk_set_t *jwks_load_fromfp(jwk_set_t *jwk_set, FILE *input)
 {
 	json_auto_t *j_all = NULL;
 	json_error_t error;
-	jwk_set_t *jwk_set;
 
 	if (input == NULL)
 		return NULL;
 
-	jwk_set = jwks_new();
+	if (jwk_set == NULL)
+		jwk_set = jwks_new();
 	if (jwk_set == NULL)
 		return NULL;
 
@@ -407,4 +467,24 @@ jwk_set_t *jwks_create_fromfp(FILE *input)
 	j_all = json_loadf(input, JSON_DECODE_ANY, &error);
 
 	return jwks_process(jwk_set, j_all, &error);
+}
+
+jwk_set_t *jwks_create(const char *jwk_json_str)
+{
+	return jwks_load(NULL, jwk_json_str);
+}
+
+jwk_set_t *jwks_create_strb(const char *jwk_json_str, const size_t len)
+{
+	return jwks_load_strb(NULL, jwk_json_str, len);
+}
+
+jwk_set_t *jwks_create_fromfile(const char *file_name)
+{
+	return jwks_load_fromfile(NULL, file_name);
+}
+
+jwk_set_t *jwks_create_fromfp(FILE *input)
+{
+	return jwks_load_fromfp(NULL, input);
 }

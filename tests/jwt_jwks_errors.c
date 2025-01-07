@@ -14,7 +14,7 @@ START_TEST(test_jwks_bad_json)
 	jwk_set_t *jwk_set = NULL;
 	const char *msg;
 
-	SET_OPS_JWK();
+	SET_OPS();
 
 	jwk_set = jwks_create(json);
 
@@ -33,11 +33,11 @@ START_TEST(test_jwks_unknown_kty)
 {
 	const char *json = "{\"kty\":\"INVALID\"}";
 	jwk_set_t *jwk_set = NULL;
-	jwk_item_t *item;
+	const jwk_item_t *item;
 	const char exp[] = "Unknown or unsupported kty type";
 	int ret;
 
-	SET_OPS_JWK();
+	SET_OPS();
 
 	jwk_set = jwks_create(json);
 
@@ -46,9 +46,9 @@ START_TEST(test_jwks_unknown_kty)
 
 	item = jwks_item_get(jwk_set, 0);
 	ck_assert_ptr_nonnull(item);
-	ck_assert_int_ne(item->error, 0);
+	ck_assert_int_ne(jwks_item_error(item), 0);
 
-	ret = strncmp(exp, item->error_msg, strlen(exp));
+	ret = strncmp(exp, jwks_item_error_msg(item), strlen(exp));
 	ck_assert_int_eq(ret, 0);
 
 	jwks_free(jwk_set);
@@ -59,11 +59,11 @@ START_TEST(test_jwks_missing_kty)
 {
 	const char *json = "{\"NOT-kty\":\"INVALID\"}";
 	jwk_set_t *jwk_set = NULL;
-	jwk_item_t *item;
+	const jwk_item_t *item;
 	const char exp[] = "Invalid JWK: missing kty value";
 	int ret;
 
-	SET_OPS_JWK();
+	SET_OPS();
 
 	jwk_set = jwks_create(json);
 
@@ -72,9 +72,9 @@ START_TEST(test_jwks_missing_kty)
 
 	item = jwks_item_get(jwk_set, 0);
 	ck_assert_ptr_nonnull(item);
-	ck_assert_int_ne(item->error, 0);
+	ck_assert_int_ne(jwks_item_error(item), 0);
 
-	ret = strncmp(exp, item->error_msg, strlen(exp));
+	ret = strncmp(exp, jwks_item_error_msg(item), strlen(exp));
 	ck_assert_int_eq(ret, 0);
 
 	jwks_free(jwk_set);
@@ -84,9 +84,9 @@ END_TEST
 START_TEST(test_jwks_empty)
 {
 	jwk_set_t *jwk_set = NULL;
-	jwk_item_t *item = NULL;
+	const jwk_item_t *item = NULL;
 
-	SET_OPS_JWK();
+	SET_OPS();
 
 	jwk_set = jwks_create(NULL);
 
@@ -95,37 +95,6 @@ START_TEST(test_jwks_empty)
 
 	item = jwks_item_get(jwk_set, 0);
 	ck_assert_ptr_null(item);
-
-	jwks_free(jwk_set);
-}
-END_TEST
-
-START_TEST(test_jwks_item_add)
-{
-	jwk_set_t *jwk_set = NULL;
-	jwk_item_t *item, *test;
-	int ret;
-
-	SET_OPS_JWK();
-
-	jwk_set = jwks_create(NULL);
-
-	ck_assert_ptr_nonnull(jwk_set);
-	ck_assert(!jwks_error(jwk_set));
-
-	ret = jwks_item_add(NULL, NULL);
-	ck_assert_int_ne(ret, 0);
-
-	item = malloc(sizeof(*item));
-	ck_assert_ptr_nonnull(item);
-
-	memset(item, 0, sizeof(*item));
-
-	ret = jwks_item_add(jwk_set, item);
-	ck_assert_int_eq(ret, 0);
-
-	test = jwks_item_get(jwk_set, 0);
-	ck_assert_ptr_eq(item, test);
 
 	jwks_free(jwk_set);
 }
@@ -144,7 +113,6 @@ static Suite *libjwt_suite(const char *title)
 	/* Core JWKS Error path tests */
 	tcase_add_loop_test(tc_core, test_jwks_bad_json, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_empty, 0, i);
-	tcase_add_loop_test(tc_core, test_jwks_item_add, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_unknown_kty, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_missing_kty, 0, i);
 

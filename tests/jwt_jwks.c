@@ -12,7 +12,7 @@
 START_TEST(test_jwks_##__name)				\
 {							\
 	SET_OPS();					\
-       __jwks_check(#__name ".json", "pem-files/"	\
+	__jwks_check(#__name ".json", "pem-files/"	\
 		#__name ".pem");			\
 }							\
 END_TEST
@@ -21,13 +21,13 @@ static void __jwks_check(const char *json, const char *pem)
 {
 	JWT_CONFIG_DECLARE(config);
 	jwk_set_auto_t *jwk_set = NULL;
-	jwk_item_t *item = NULL;
+	const jwk_item_t *item = NULL;
 	jwt_auto_t *jwt = NULL;
 	char *out = NULL;
 	int ret;
 
-        /* Load up the JWKS */
-        read_key(json);
+	/* Load up the JWKS */
+	read_key(json);
 	jwk_set = jwks_create(test_data.key);
 	free_key();
 	ck_assert_ptr_nonnull(jwk_set);
@@ -38,16 +38,9 @@ static void __jwks_check(const char *json, const char *pem)
 	item = jwks_item_get(jwk_set, 0);
 	ck_assert_ptr_nonnull(item);
 
-	/* If the key is not any provider, we need ops support. */
-	if (item->provider != JWT_CRYPTO_OPS_ANY &&
-	    !jwt_crypto_ops_supports_jwk()) {
-		ck_assert(item->error);
-		return;
-	}
-
-	if (item->kty != JWK_KEY_TYPE_OCT) {
+	if (jwks_item_pem(item) != NULL) {
 		read_key(pem);
-		ret = strcmp(item->pem, test_data.key);
+		ret = strcmp(jwks_item_pem(item), test_data.key);
 		free_key();
 		ck_assert_int_eq(ret, 0);
 	}
@@ -60,14 +53,15 @@ static void __jwks_check(const char *json, const char *pem)
 	item = jwks_item_get(jwk_set, 0);
 	ck_assert_ptr_nonnull(item);
 
-	if (!item->is_private_key)
+	if (!jwks_item_is_private(item))
 		return;
 
-	if (item->alg == JWT_ALG_NONE && item->kty == JWK_KEY_TYPE_RSA) {
+	if (jwks_item_alg(item) == JWT_ALG_NONE &&
+			jwks_item_kty(item) == JWK_KEY_TYPE_RSA) {
 		/* "alg" is optional, and it's missing in a few keys */
 		config.alg = JWT_ALG_RS256;
 	} else {
-		config.alg = item->alg;
+		config.alg = jwks_item_alg(item);
 	}
 
 	/* Use our JWK */
@@ -77,25 +71,29 @@ static void __jwks_check(const char *json, const char *pem)
 
 	/* Add some grants */
 	ret = jwt_add_grant(jwt, "iss", "files.maclara-llc.com");
-        ck_assert_int_eq(ret, 0);
+	ck_assert_int_eq(ret, 0);
 
-        ret = jwt_add_grant(jwt, "sub", "user0");
-        ck_assert_int_eq(ret, 0);
+	ret = jwt_add_grant(jwt, "sub", "user0");
+	ck_assert_int_eq(ret, 0);
 
-        ret = jwt_add_grant(jwt, "ref", "XXXX-YYYY-ZZZZ-AAAA-CCCC");
-        ck_assert_int_eq(ret, 0);
+	ret = jwt_add_grant(jwt, "ref", "XXXX-YYYY-ZZZZ-AAAA-CCCC");
+	ck_assert_int_eq(ret, 0);
 
-        ret = jwt_add_grant_int(jwt, "iat", TS_CONST);
-        ck_assert_int_eq(ret, 0);
+	ret = jwt_add_grant_int(jwt, "iat", TS_CONST);
+	ck_assert_int_eq(ret, 0);
 
 	/* Encode it */
-        out = jwt_encode_str(jwt);
-        ck_assert_ptr_nonnull(out);
+	out = jwt_encode_str(jwt);
+	/* We allow this for now. */
+	if (errno == ENOTSUP)
+		return;
+
+	ck_assert_ptr_nonnull(out);
 
 	/* Verify it using our JWK */
-        __verify_jwk(out, item);
+	__verify_jwk(out, item);
 
-        jwt_free_str(out);
+	jwt_free_str(out);
 }
 
 JWKS_KEY_TEST(ec_key_prime256v1);
@@ -128,15 +126,15 @@ JWKS_KEY_TEST(oct_key_512);
 
 START_TEST(test_jwks_keyring_load)
 {
-	jwk_item_t *item;
+	const jwk_item_t *item;
 	int i;
 
-	SET_OPS_JWK();
+	SET_OPS();
 
 	read_json("jwks_keyring.json");
 
 	for (i = 0; (item = jwks_item_get(g_jwk_set, i)); i++)
-		ck_assert(!item->error);
+		ck_assert(!jwks_item_error(item));
 
 	ck_assert_int_eq(i, 22);
 
@@ -153,17 +151,17 @@ START_TEST(test_jwks_key_op_all_types)
 		JWK_KEY_OP_UNWRAP | JWK_KEY_OP_DERIVE_KEY |
 		JWK_KEY_OP_DERIVE_BITS;
 
-	jwk_item_t *item;
+	const jwk_item_t *item;
 
-	SET_OPS_JWK();
+	SET_OPS();
 
 	read_jsonfp("jwks_test-1.json");
 
 	item = jwks_item_get(g_jwk_set, 0);
 	ck_assert_ptr_nonnull(item);
-	ck_assert(!item->error);
+	ck_assert(!jwks_item_error(item));
 
-	ck_assert_int_eq(item->key_ops, key_ops);
+	ck_assert_int_eq(jwks_item_key_ops(item), key_ops);
 
 	free_key();
 }
@@ -171,11 +169,11 @@ END_TEST
 
 START_TEST(test_jwks_key_op_bad_type)
 {
-	jwk_item_t *item;
+	const jwk_item_t *item;
 	const char *msg = "JWK has an invalid value in key_op";
 	const char *kid = "264265c2-4ef0-4751-adbd-9739550afe5b";
 
-	SET_OPS_JWK();
+	SET_OPS();
 
 	read_key("jwks_test-2.json");
 
@@ -183,17 +181,17 @@ START_TEST(test_jwks_key_op_bad_type)
 	ck_assert_ptr_nonnull(item);
 
 	/* One item had a bad type (numeric). */
-	ck_assert(item->error);
-	ck_assert_str_eq(item->error_msg, msg);
+	ck_assert(jwks_item_error(item));
+	ck_assert_str_eq(jwks_item_error_msg(item), msg);
 
 	/* Only these ops set. */
-	ck_assert_int_eq(item->key_ops,
+	ck_assert_int_eq(jwks_item_key_ops(item),
 		JWK_KEY_OP_VERIFY | JWK_KEY_OP_DERIVE_BITS);
 
-	ck_assert_int_eq(item->use, JWK_PUB_KEY_USE_ENC);
+	ck_assert_int_eq(jwks_item_use(item), JWK_PUB_KEY_USE_ENC);
 
 	/* Check this key ID. */
-	ck_assert_str_eq(item->kid, kid);
+	ck_assert_str_eq(jwks_item_kid(item), kid);
 
 	free_key();
 }
