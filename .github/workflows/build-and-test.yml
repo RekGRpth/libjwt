@@ -1,6 +1,7 @@
-name: LibJWT Unit Tests, Coverage, and Docs
+name: LibJWT Build, Unit Tests, and Coverage
 
 on:
+  workflow_dispatch:
   push:
     branches: [ "master" ]
     paths-ignore:
@@ -23,12 +24,10 @@ jobs:
       with:
         brew: gnutls openssl@3 jansson pkgconf cmake check
 
-    - name: Build, Test, and Docs
+    - name: Build and Test
       uses: threeal/cmake-action@v2.1.0
       with:
         options: |
-          WITH_OPENSSL=YES
-          WITH_GNUTLS=YES
           WITH_TESTS=YES
         build-args: |
           --
@@ -56,6 +55,7 @@ jobs:
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: ${{github.workspace}}/build/check-code-coverage.info
+        disable_search: true
         verbose: true
 
     - name: Memcheck

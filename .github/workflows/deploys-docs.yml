@@ -1,6 +1,7 @@
 name: LibJWT Documentation
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - "master"
@@ -19,12 +20,14 @@ jobs:
     - uses: actions/checkout@v4
       with:
         fetch-tags: true
+        fetch-depth: 0
     - uses: ConorMacBride/install-package@v1
       with:
-        brew: gnutls openssl@3 jansson pkgconf cmake doxygen graphviz
+        brew: gnutls openssl@3 jansson pkgconf cmake doxygen graphviz autoconf automake libtool
 
     - name: Build Head docs
       run: |
+        set -e
         cmake -B build
         make -C build doxygen-doc
         mkdir -p gh-pages
@@ -33,11 +36,16 @@ jobs:
 
     - name: Build Latest tag docs
       run: |
+        set -e
         git checkout $(git describe --tags --abbrev=0)
-        cmake -B build
-        make -C build doxygen-doc
+        autoreconf -fi
+        mkdir build
+        cd build
+        ../configure
+        make doxygen-doc
+        cd ..
         mv build/doxygen-doc/html/* gh-pages/
-        find gh-pages/ -type f -ls
+        rm -rf build
 
     - name: Upload pages
       id: deployment
@@ -46,6 +54,10 @@ jobs:
         path: gh-pages/
 
   deploy:
+    permissions:
+      id-token: write
+      pages: write
+      deployments: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

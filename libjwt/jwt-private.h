@@ -1,4 +1,4 @@
-/* Copyright (C) 2015-2024 maClara, LLC <info@maclara-llc.com>
+/* Copyright (C) 2015-2025 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -42,20 +42,10 @@ extern struct jwt_crypto_ops *jwt_ops;
 struct jwt {
 	jwt_alg_t alg;
 
-	/* We don't use these anymore. They are just here for
-	 * compatibility. */
-	unsigned char *key_unused;
-	int key_len_unused;
-
 	json_t *grants;
 	json_t *headers;
 
-	/* We use this instead */
-	struct {
-		void *key;
-		size_t key_len;
-		const jwk_item_t *jw_key;
-	} config;
+	const jwk_item_t *jw_key;
 };
 
 struct jwt_valid {
@@ -128,12 +118,20 @@ void __jwt_freemem(void *ptr);
 JWT_NO_EXPORT
 void *jwt_realloc(void *ptr, size_t size);
 
+JWT_NO_EXPORT
+jwt_t *jwt_new(void);
+
 #define jwt_freemem(__ptr) ({		\
 	if (__ptr) {			\
 		__jwt_freemem(__ptr);	\
 		__ptr = NULL;		\
 	}				\
 })
+
+static inline void jwt_freememp(char **mem) {
+	jwt_freemem(*mem);
+}
+#define char_auto char  __attribute__((cleanup(jwt_freememp)))
 
 /* Helper routines to handle base64url encoding without percent padding
  * as defined in RFC-4648. */
