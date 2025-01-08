@@ -48,24 +48,25 @@ static int write_js(const json_t *js, char **buf, int pretty)
 
 static int jwt_write_head(jwt_t *jwt, char **buf, int pretty)
 {
-	int ret = 0;
+	jwt_value_t jval;
 
 	if (jwt->alg != JWT_ALG_NONE) {
+
 		/* Only add default 'typ' header if it has not been defined,
 		 * allowing for any value of it. This allows for signaling
 		 * of application specific extensions to JWT, such as PASSporT,
 		 * RFC 8225. */
-		if ((ret = jwt_add_header(jwt, "typ", "JWT"))) {
-			if (ret != EEXIST)
-				return ret;
+		jwt_set_ADD_STR(&jval, "typ", "JWT");
+		if (jwt_header_add(jwt, &jval)) {
+			if (jval.error != JWT_VALUE_ERR_EXIST)
+				return jval.error;
 		}
 	}
 
-	if ((ret = jwt_del_headers(jwt, "alg")))
-		return ret;
-
-	if ((ret = jwt_add_header(jwt, "alg", jwt_alg_str(jwt->alg))))
-		return ret;
+	jwt_set_ADD_STR(&jval, "alg", jwt_alg_str(jwt->alg));
+	jval.replace = 1;
+	if (jwt_header_add(jwt, &jval))
+		return jval.error;
 
 	return write_js(jwt->headers, buf, pretty);
 }
@@ -73,57 +74,6 @@ static int jwt_write_head(jwt_t *jwt, char **buf, int pretty)
 static int jwt_write_body(jwt_t *jwt, char **buf, int pretty)
 {
 	return write_js(jwt->grants, buf, pretty);
-}
-
-static int jwt_dump(jwt_t *jwt, char **buf, int pretty)
-{
-	int ret;
-
-	ret = jwt_write_head(jwt, buf, pretty);
-
-	if (ret == 0)
-		ret = __append_str(buf, ".");
-
-	if (ret == 0)
-		ret = jwt_write_body(jwt, buf, pretty);
-
-	return ret;
-}
-
-char *jwt_dump_grants_str(jwt_t *jwt, int pretty)
-{
-	char *out = NULL;
-
-	errno = jwt_write_body(jwt, &out, pretty);
-
-	if (errno)
-		jwt_freemem(out);
-
-	return out;
-}
-
-int jwt_dump_fp(jwt_t *jwt, FILE *fp, int pretty)
-{
-	char_auto *out = NULL;
-
-	errno = jwt_dump(jwt, &out, pretty);
-
-	if (errno == 0)
-		fputs(out, fp);
-
-	return errno;
-}
-
-char *jwt_dump_str(jwt_t *jwt, int pretty)
-{
-	char *out = NULL;
-
-	errno = jwt_dump(jwt, &out, pretty);
-
-	if (errno)
-		jwt_freemem(out);
-
-	return out;
 }
 
 static int jwt_encode(jwt_t *jwt, char **out)

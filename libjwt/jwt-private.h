@@ -31,12 +31,14 @@
 JWT_NO_EXPORT
 extern struct jwt_crypto_ops *jwt_ops;
 
-/* This can be used for jwk_set_t and jwk_item_t */
-#define jwks_write_error(__obj, __fmt, __args...)		\
-({								\
-	snprintf(__obj->error_msg, sizeof(__obj->error_msg),	\
-		 __fmt, ##__args);				\
-	__obj->error = 1;					\
+/* This can be used for jwt_t, jwk_set_t and jwk_item_t */
+#define jwt_write_error(__obj, __fmt, __args...)	\
+({							\
+	if (!strlen(__obj->error_msg))			\
+		snprintf(__obj->error_msg,		\
+			 sizeof(__obj->error_msg),	\
+		 __fmt, ##__args);			\
+	__obj->error = 1;				\
 })
 
 struct jwt {
@@ -46,6 +48,9 @@ struct jwt {
 	json_t *headers;
 
 	const jwk_item_t *jw_key;
+
+	int error;
+	char error_msg[256];
 };
 
 struct jwt_valid {
@@ -57,13 +62,6 @@ struct jwt_valid {
 	json_t *req_grants;
 	jwt_valid_exception_t status;
 };
-
-/* Yes, this is a bit of overhead, but it keeps me from having to
- * expose list.h in jwt.h. */
-typedef struct jwk_list_item {
-	ll_t node;
-	jwk_item_t *item;
-} jwk_list_item_t;
 
 struct jwk_set {
 	ll_t head;
@@ -83,6 +81,7 @@ struct jwk_set {
  * this. It's provided as a convenience.
  */
 struct jwk_item {
+	ll_t node;
 	char *pem;		/**< If not NULL, contains PEM string of this key	*/
 	jwt_crypto_provider_t provider;	/**< Crypto provider that owns this key		*/
 	union {
@@ -193,7 +192,7 @@ JWT_NO_EXPORT
 void jwt_scrub_key(jwt_t *jwt);
 
 JWT_NO_EXPORT
-int jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
+jwt_t *jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
                    const char *sig);
 JWT_NO_EXPORT
 int jwt_sign(jwt_t *jwt, char **out, unsigned int *len, const char *str,

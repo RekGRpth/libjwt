@@ -8,269 +8,285 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <errno.h>
 
 #include <jwt.h>
 
 #include "jwt-private.h"
 
-const char *jwt_get_grant(const jwt_t *jwt, const char *grant)
+static jwt_value_error_t jwt_get_str(const jwt_t *jwt, json_t *which,
+				     jwt_value_t *jval)
 {
-	if (!jwt || !grant || !strlen(grant)) {
-		errno = EINVAL;
-		return NULL;
-	}
+	json_t *val;
 
-	errno = 0;
+	if (!jval->name || !strlen(jval->name))
+		return jval->error = JWT_VALUE_ERR_INVALID;
 
-	return get_js_string(jwt->grants, grant);
+	val = json_object_get(which, jval->name);
+	if (val == NULL)
+		return jval->error = JWT_VALUE_ERR_NOEXIST;
+	else if (!json_is_string(val))
+		return jval->error = JWT_VALUE_ERR_TYPE;
+
+	jval->str_val = json_string_value(val);
+	if (jval->str_val == NULL)
+		jval->error = JWT_VALUE_ERR_INVALID;
+
+	return jval->error;
 }
 
-long jwt_get_grant_int(const jwt_t *jwt, const char *grant)
+static jwt_value_error_t jwt_get_int(const jwt_t *jwt, json_t *which,
+				     jwt_value_t *jval)
 {
-	if (!jwt || !grant || !strlen(grant)) {
-		errno = EINVAL;
-		return 0;
-	}
+	json_t *val;
 
-	errno = 0;
+	if (!jval->name || !strlen(jval->name))
+		return jval->error = JWT_VALUE_ERR_INVALID;
 
-	return get_js_int(jwt->grants, grant);
+	val = json_object_get(which, jval->name);
+	if (val == NULL)
+		return jval->error = JWT_VALUE_ERR_NOEXIST;
+	else if (!json_is_integer(val))
+		return jval->error = JWT_VALUE_ERR_TYPE;
+
+	jval->int_val = (long)json_integer_value(val);
+
+	return jval->error;
 }
 
-int jwt_get_grant_bool(const jwt_t *jwt, const char *grant)
+static jwt_value_error_t jwt_get_bool(const jwt_t *jwt, json_t *which,
+				      jwt_value_t *jval)
 {
-	if (!jwt || !grant || !strlen(grant)) {
-		errno = EINVAL;
-		return 0;
-	}
+	json_t *val;
 
-	errno = 0;
+	if (!jval->name || !strlen(jval->name))
+		return jval->error = JWT_VALUE_ERR_INVALID;
 
-	return get_js_bool(jwt->grants, grant);
+	val = json_object_get(which, jval->name);
+	if (val == NULL)
+		return jval->error = JWT_VALUE_ERR_NOEXIST;
+	else if (!json_is_boolean(val))
+		return jval->error = JWT_VALUE_ERR_TYPE;
+
+	jval->bool_val = json_is_true(val) ? 1 : 0;
+
+	return jval->error;
 }
 
-char *jwt_get_grants_json(const jwt_t *jwt, const char *grant)
+static jwt_value_error_t jwt_get_json(const jwt_t *jwt, json_t *which,
+				      jwt_value_t *jval)
 {
-	json_t *js_val = NULL;
+	json_t *json_val = NULL;
+	size_t flags = JSON_SORT_KEYS | JSON_ENCODE_ANY;
 
-	if (!jwt) {
-		errno = EINVAL;
-		return NULL;
-	}
-
-	if (grant && strlen(grant))
-		js_val = json_object_get(jwt->grants, grant);
+	if (jval->pretty)
+		flags |= JSON_INDENT(4);
 	else
-		js_val = jwt->grants;
+		flags |= JSON_COMPACT;
 
-	if (js_val == NULL) {
-		errno = ENOENT;
-		return NULL;
-	}
-
-	errno = 0;
-
-	return json_dumps(js_val, JSON_SORT_KEYS | JSON_COMPACT |
-			  JSON_ENCODE_ANY);
-}
-
-int jwt_add_grant(jwt_t *jwt, const char *grant, const char *val)
-{
-	if (!jwt || !grant || !strlen(grant) || !val)
-		return EINVAL;
-
-	if (get_js_string(jwt->grants, grant) != NULL)
-		return EEXIST;
-
-	if (json_object_set_new(jwt->grants, grant, json_string(val)))
-		return EINVAL;
-
-	return 0;
-}
-
-int jwt_add_grant_int(jwt_t *jwt, const char *grant, long val)
-{
-	if (!jwt || !grant || !strlen(grant))
-		return EINVAL;
-
-	if (get_js_int(jwt->grants, grant) != -1)
-		return EEXIST;
-
-	if (json_object_set_new(jwt->grants, grant, json_integer((json_int_t)val)))
-		return EINVAL;
-
-	return 0;
-}
-
-int jwt_add_grant_bool(jwt_t *jwt, const char *grant, int val)
-{
-	if (!jwt || !grant || !strlen(grant))
-		return EINVAL;
-
-	if (get_js_int(jwt->grants, grant) != -1)
-		return EEXIST;
-
-	if (json_object_set_new(jwt->grants, grant, json_boolean(val)))
-		return EINVAL;
-
-	return 0;
-}
-
-int jwt_add_grants_json(jwt_t *jwt, const char *json)
-{
-	json_auto_t *js_val = NULL;
-	int ret = -1;
-
-	if (!jwt)
-		return EINVAL;
-
-	js_val = json_loads(json, JSON_REJECT_DUPLICATES, NULL);
-
-	if (json_is_object(js_val))
-		ret = json_object_update(jwt->grants, js_val);
-
-	return ret ? EINVAL : 0;
-}
-
-int jwt_del_grants(jwt_t *jwt, const char *grant)
-{
-	if (!jwt)
-		return EINVAL;
-
-	if (grant == NULL || !strlen(grant))
-		json_object_clear(jwt->grants);
+	if (jval->name && strlen(jval->name))
+		json_val = json_object_get(which, jval->name);
 	else
-		json_object_del(jwt->grants, grant);
+		json_val = which;
 
-	return 0;
+	if (json_val == NULL)
+		return jval->error = JWT_VALUE_ERR_NOEXIST;
+
+	jval->json_val = json_dumps(json_val, flags);
+	if (jval->json_val == NULL)
+		jval->error = JWT_VALUE_ERR_NOMEM;
+
+	return jval->error;
 }
 
-const char *jwt_get_header(const jwt_t *jwt, const char *header)
+static jwt_value_error_t jwt_obj_check(json_t *which, jwt_value_t *jval)
 {
-	if (!jwt || !header || !strlen(header)) {
-		errno = EINVAL;
-		return NULL;
+	if (json_object_get(which, jval->name)) {
+		if (jval->replace)
+			json_object_del(which, jval->name);
+		else
+			return jval->error = JWT_VALUE_ERR_EXIST;
 	}
 
-	errno = 0;
-
-	return get_js_string(jwt->headers, header);
+	return JWT_VALUE_ERR_NONE;
 }
 
-long jwt_get_header_int(const jwt_t *jwt, const char *header)
+static jwt_value_error_t jwt_add_str(jwt_t *jwt, json_t *which,
+				     jwt_value_t *jval)
 {
-	if (!jwt || !header || !strlen(header)) {
-		errno = EINVAL;
-		return 0;
+	if (!jval->name || !strlen(jval->name) || !jval->str_val)
+		return jval->error = JWT_VALUE_ERR_INVALID;
+
+	if (jwt_obj_check(which, jval))
+		return jval->error;
+
+	if (json_object_set_new(which, jval->name, json_string(jval->str_val)))
+		jval->error = JWT_VALUE_ERR_INVALID;
+
+	return jval->error;
+}
+
+static jwt_value_error_t jwt_add_int(jwt_t *jwt, json_t *which,
+				     jwt_value_t *jval)
+{
+	if (!jval->name || !strlen(jval->name))
+		return jval->error = JWT_VALUE_ERR_INVALID;
+
+	if (jwt_obj_check(which, jval))
+		return jval->error;
+
+	if (json_object_set_new(which, jval->name,
+				json_integer((json_int_t)jval->int_val)))
+		jval->error = JWT_VALUE_ERR_INVALID;
+
+	return jval->error;
+}
+
+static jwt_value_error_t jwt_add_bool(jwt_t *jwt, json_t *which,
+				      jwt_value_t *jval)
+{
+	if (!jval->name || !strlen(jval->name))
+		return jval->error = JWT_VALUE_ERR_INVALID;
+
+	if (jwt_obj_check(which, jval))
+		return jval->error;
+
+	if (json_object_set_new(which, jval->name, json_boolean(jval->bool_val)))
+		jval->error = JWT_VALUE_ERR_INVALID;
+
+	return jval->error;
+}
+
+static jwt_value_error_t jwt_add_json(jwt_t *jwt, json_t *which,
+				      jwt_value_t *jval)
+{
+	json_auto_t *json_val;
+	int ret;
+
+	json_val = json_loads(jval->json_val, JSON_REJECT_DUPLICATES, NULL);
+
+	if (!json_is_object(json_val))
+		return jval->error = JWT_VALUE_ERR_INVALID;
+
+	if (jval->name == NULL) {
+		/* Update the whole thing */
+		if (jval->replace)
+			ret = json_object_update(which, json_val);
+		else
+			ret = json_object_update_missing(which, json_val);
+
+		if (ret)
+			return jval->error = JWT_VALUE_ERR_INVALID;
+	} else {
+		/* Add object at name */
+		if (jwt_obj_check(which, jval))
+			return jval->error;
+
+		if (json_object_set_new(which, jval->name, json_val))
+			return jval->error = JWT_VALUE_ERR_INVALID;
 	}
 
-	errno = 0;
-
-	return get_js_int(jwt->headers, header);
+	return jval->error;
 }
 
-int jwt_get_header_bool(const jwt_t *jwt, const char *header)
+static jwt_value_error_t __deleter(jwt_t *jwt, json_t *which, const char *field)
 {
-	if (!jwt || !header || !strlen(header)) {
-		errno = EINVAL;
-		return 0;
-	}
-
-	errno = 0;
-
-	return get_js_bool(jwt->headers, header);
-}
-
-char *jwt_get_headers_json(const jwt_t *jwt, const char *header)
-{
-	json_t *js_val = NULL;
-
-	errno = EINVAL;
-
 	if (!jwt)
-		return NULL;
+		return JWT_VALUE_ERR_INVALID;
 
-	if (header && strlen(header))
-		js_val = json_object_get(jwt->headers, header);
+	if (field == NULL || !strlen(field))
+		json_object_clear(which);
 	else
-		js_val = jwt->headers;
+		json_object_del(which, field);
 
-	if (js_val == NULL)
-		return NULL;
-
-	errno = 0;
-
-	return json_dumps(js_val, JSON_SORT_KEYS | JSON_COMPACT | JSON_ENCODE_ANY);
+	return JWT_VALUE_ERR_NONE;
 }
 
-int jwt_add_header(jwt_t *jwt, const char *header, const char *val)
+static jwt_value_error_t __adder(jwt_t *jwt, json_t *which, jwt_value_t *value)
 {
-	if (!jwt || !header || !strlen(header) || !val)
-		return EINVAL;
+	if (!jwt || !value || !which) {
+		if (value)
+			return value->error = JWT_VALUE_ERR_INVALID;
+		else
+			return JWT_VALUE_ERR_INVALID;
+	}
 
-	if (get_js_string(jwt->headers, header) != NULL)
-		return EEXIST;
+	value->error = JWT_VALUE_ERR_NONE;
 
-	if (json_object_set_new(jwt->headers, header, json_string(val)))
-		return EINVAL;
+	switch (value->type) {
+	case JWT_VALUE_INT:
+		return jwt_add_int(jwt, which, value);
 
-	return 0;
+	case JWT_VALUE_STR:
+		return jwt_add_str(jwt, which, value);
+
+	case JWT_VALUE_BOOL:
+		return jwt_add_bool(jwt, which, value);
+
+	case JWT_VALUE_JSON:
+		return jwt_add_json(jwt, which, value);
+
+	default:
+		return value->error = JWT_VALUE_ERR_INVALID;
+	}
 }
 
-int jwt_add_header_int(jwt_t *jwt, const char *header, long val)
+static jwt_value_error_t __getter(jwt_t *jwt, json_t *which, jwt_value_t *value)
 {
-	if (!jwt || !header || !strlen(header))
-		return EINVAL;
+	if (!jwt || !value || !which) {
+		if (value)
+			return value->error = JWT_VALUE_ERR_INVALID;
+		else
+			return JWT_VALUE_ERR_INVALID;
+	}
 
-	if (get_js_int(jwt->headers, header) != -1)
-		return EEXIST;
+	value->error = JWT_VALUE_ERR_NONE;
 
-	if (json_object_set_new(jwt->headers, header, json_integer((json_int_t)val)))
-		return EINVAL;
+	switch (value->type) {
+	case JWT_VALUE_INT:
+		return jwt_get_int(jwt, which, value);
 
-	return 0;
+	case JWT_VALUE_STR:
+		return jwt_get_str(jwt, which, value);
+
+	case JWT_VALUE_BOOL:
+		return jwt_get_bool(jwt, which, value);
+
+	case JWT_VALUE_JSON:
+		return jwt_get_json(jwt, which, value);
+
+	default:
+		return value->error = JWT_VALUE_ERR_INVALID;
+	}
 }
 
-int jwt_add_header_bool(jwt_t *jwt, const char *header, int val)
+/* Headers */
+jwt_value_error_t jwt_header_get(jwt_t *jwt, jwt_value_t *value)
 {
-	if (!jwt || !header || !strlen(header))
-		return EINVAL;
-
-	if (get_js_int(jwt->headers, header) != -1)
-		return EEXIST;
-
-	if (json_object_set_new(jwt->headers, header, json_boolean(val)))
-		return EINVAL;
-
-	return 0;
+	return __getter(jwt, jwt ? jwt->headers : NULL, value);
 }
 
-int jwt_add_headers_json(jwt_t *jwt, const char *json)
+jwt_value_error_t jwt_header_add(jwt_t *jwt, jwt_value_t *value)
 {
-	json_auto_t *js_val = NULL;
-	int ret = -1;
-
-	if (!jwt)
-		return EINVAL;
-
-	js_val = json_loads(json, JSON_REJECT_DUPLICATES, NULL);
-
-	if (json_is_object(js_val))
-		ret = json_object_update(jwt->headers, js_val);
-
-	return ret ? EINVAL : 0;
+	return __adder(jwt, jwt ? jwt->headers : NULL, value);
 }
 
-int jwt_del_headers(jwt_t *jwt, const char *header)
+jwt_value_error_t jwt_header_del(jwt_t *jwt, const char *header)
 {
-	if (!jwt)
-		return EINVAL;
+	return __deleter(jwt, jwt ? jwt->headers : NULL, header);
+}
 
-	if (header == NULL || !strlen(header))
-		json_object_clear(jwt->headers);
-	else
-		json_object_del(jwt->headers, header);
+/* Grants */
+jwt_value_error_t jwt_grant_get(jwt_t *jwt, jwt_value_t *value)
+{
+	return __getter(jwt, jwt ? jwt->grants : NULL, value);
+}
 
-	return 0;
+jwt_value_error_t jwt_grant_add(jwt_t *jwt, jwt_value_t *value)
+{
+	return __adder(jwt, jwt ? jwt->grants : NULL, value);
+}
+
+jwt_value_error_t jwt_grant_del(jwt_t *jwt, const char *grant)
+{
+	return __deleter(jwt, jwt ? jwt->grants : NULL, grant);
 }
