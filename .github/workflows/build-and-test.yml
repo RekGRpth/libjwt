@@ -8,12 +8,16 @@ on:
       - "doxygen/**"
       - ".github/**"
       - "images/**"
+      - ".gitignore"
+      - "*.md"
   pull_request:
     branches: [ "master" ]
     paths-ignore:
       - "doxygen/**"
       - ".github/**"
       - "images/**"
+      - ".gitignore"
+      - "*.md"
 
 jobs:
   build-macos:
@@ -29,6 +33,7 @@ jobs:
       with:
         options: |
           WITH_TESTS=YES
+          WITH_EXAMPLES=YES
         build-args: |
           --
           check
@@ -46,6 +51,7 @@ jobs:
       with:
         options: |
           ENABLE_COVERAGE=YES
+          WITH_EXAMPLES=YES
         build-args: |
           --
           check

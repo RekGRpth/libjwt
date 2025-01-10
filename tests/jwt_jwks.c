@@ -44,6 +44,12 @@ static void __jwks_check(const char *json, const char *pem)
 		ret = strcmp(jwks_item_pem(item), test_data.key);
 		free_key();
 		ck_assert_int_eq(ret, 0);
+
+		if (jwks_item_alg(item) == JWT_ALG_ES256) {
+			ck_assert_str_eq(jwks_item_curve(item), "P-256");
+			ck_assert_int_eq(jwks_item_kty(item), JWK_KEY_TYPE_EC);
+			ck_assert_int_eq(jwks_item_key_bits(item), 256);
+		}
 	}
 
 	/* Should only be one key in the set */
@@ -93,6 +99,8 @@ static void __jwks_check(const char *json, const char *pem)
 	if (jwt_error(jwt)) {
 		if (!strcmp(jwt_error_msg(jwt), "ES256K Not Supported on GnuTLS"))
 			return;
+		if (!strcmp(jwt_error_msg(jwt), "ED448 is not yet implemented in GnuTLS"))
+			return;
 	}
 
 	ck_assert_int_eq(jwt_error(jwt), 0);
@@ -115,6 +123,8 @@ JWKS_KEY_TEST(ec_key_secp521r1_pub);
 
 JWKS_KEY_TEST(eddsa_key_ed25519);
 JWKS_KEY_TEST(eddsa_key_ed25519_pub);
+JWKS_KEY_TEST(eddsa_key_ed448);
+JWKS_KEY_TEST(eddsa_key_ed448_pub);
 
 JWKS_KEY_TEST(rsa_key_2048);
 JWKS_KEY_TEST(rsa_key_2048_pub);
@@ -152,6 +162,29 @@ START_TEST(test_jwks_keyring_load)
 }
 END_TEST
 
+START_TEST(test_jwks_keyring_all_bad)
+{
+	const jwk_item_t *item;
+	jwk_set_auto_t *jwk_set;
+	int i;
+
+        SET_OPS();
+
+	jwk_set = jwks_create_fromfile(KEYDIR "/bad_keys.json");
+	ck_assert_ptr_nonnull(jwk_set);
+
+	for (i = 0; (item = jwks_item_get(jwk_set, i)); i++) {
+		if (!jwks_item_error(item)) {
+			fprintf(stderr, "KID: %s\n",
+				jwks_item_kid(item));
+		}
+		ck_assert_int_ne(jwks_item_error(item), 0);
+	}
+
+	ck_assert_int_eq(i, 14);
+}
+END_TEST
+
 START_TEST(test_jwks_key_op_all_types)
 {
 	jwk_key_op_t key_ops = JWK_KEY_OP_SIGN | JWK_KEY_OP_VERIFY |
@@ -178,7 +211,6 @@ END_TEST
 START_TEST(test_jwks_key_op_bad_type)
 {
 	const jwk_item_t *item;
-	const char *msg = "JWK has an invalid value in key_op";
 	const char *kid = "264265c2-4ef0-4751-adbd-9739550afe5b";
 
 	SET_OPS();
@@ -188,9 +220,8 @@ START_TEST(test_jwks_key_op_bad_type)
 	item = jwks_item_get(g_jwk_set, 0);
 	ck_assert_ptr_nonnull(item);
 
-	/* One item had a bad type (numeric). */
-	ck_assert(jwks_item_error(item));
-	ck_assert_str_eq(jwks_item_error_msg(item), msg);
+	/* The bad key_op is ignored. */
+	ck_assert(!jwks_item_error(item));
 
 	/* Only these ops set. */
 	ck_assert_int_eq(jwks_item_key_ops(item),
@@ -227,6 +258,8 @@ static Suite *libjwt_suite(const char *title)
 
 	tcase_add_loop_test(tc_core, test_jwks_eddsa_key_ed25519, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_eddsa_key_ed25519_pub, 0, i);
+	tcase_add_loop_test(tc_core, test_jwks_eddsa_key_ed448, 0, i);
+	tcase_add_loop_test(tc_core, test_jwks_eddsa_key_ed448_pub, 0, i);
 
 	tcase_add_loop_test(tc_core, test_jwks_rsa_key_2048, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_rsa_key_2048_pub, 0, i);
@@ -246,6 +279,7 @@ static Suite *libjwt_suite(const char *title)
 
 	/* Load a whole keyring of all of the above. */
 	tcase_add_loop_test(tc_core, test_jwks_keyring_load, 0, i);
+	tcase_add_loop_test(tc_core, test_jwks_keyring_all_bad, 0, i);
 
 	/* Some coverage attempts. */
 	tcase_add_loop_test(tc_core, test_jwks_key_op_all_types, 0, i);
