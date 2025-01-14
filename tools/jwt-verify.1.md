@@ -28,6 +28,17 @@ Tokens may be passed on the command line, after any options, separated
 by spaces, or passed via **stdin**, one per line. To use **stdin**, you
 must pass **-** as the last and only argument after any options.
 
+When using the **\-\-verbose** option, **jwt-verify** will print the JSON
+_HEADER_ and _PAYLOAD_ to **stdout**.
+
+If used in conjuction with **\-\-print**, the JSON will be piped to the
+command's **stdin**. It will be called twice: once for _HEAD_ and once for
+_PAYLOAD_.
+
+One use is to pass it through **jq -C** for indenting and colorization. Another
+would be to use an external program to validate the _PAYLOAD_ contents. A non-0
+exit status from the program will cause verification to fail.
+
 ## Options
 
 **\-h**, **\-\-help**
@@ -53,6 +64,10 @@ must pass **-** as the last and only argument after any options.
   ~ Path to a file containing a key in JSON Web Key format. If your keys are
   in PEM or DER (or some other common format that _OpenSSL_ understands), then
   you can convert it to a JWK with the **key2jwk(1)** tool.
+
+**\-p** _CMD_, **\-\-print**=_CMD_
+  ~ Pipe JSON of header and payload to _CMD_ through its **stdin**. This option
+  only makes sense with **\-\-verbose**.
 
 # BUGS
 
