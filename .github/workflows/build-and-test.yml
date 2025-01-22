@@ -57,7 +57,7 @@ jobs:
           check
           check-code-coverage
 
-    - uses: codecov/codecov-action@v5.1.2
+    - uses: codecov/codecov-action@v5.2.0
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         files: ${{github.workspace}}/build/check-code-coverage.info
