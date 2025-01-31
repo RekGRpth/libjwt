@@ -144,8 +144,8 @@ typedef enum {
 	JWK_KEY_OP_INVALID	= 0xffff,	/**< Invalid key_ops in JWK */
 } jwk_key_op_t;
 
-/** @ingroup jwt_claims_grp
- * @brief Value types for grants and headers
+/** @ingroup jwt_claims_helpers_grp
+ * @brief Value types for claims and headers
  */
 typedef enum {
 	JWT_VALUE_NONE = 0,	/**< No type (do not use this)		*/
@@ -156,8 +156,8 @@ typedef enum {
 	JWT_VALUE_INVALID,	/**< Invalid (used internally)		*/
 } jwt_value_type_t;
 
-/** @ingroup jwt_claims_grp
- * @brief Error values for header and grant requests
+/** @ingroup jwt_claims_helpers_grp
+ * @brief Error values for header and claim requests
  */
 typedef enum {
 	JWT_VALUE_ERR_NONE = 0,	/**< No error, success			*/
@@ -168,8 +168,8 @@ typedef enum {
 	JWT_VALUE_ERR_NOMEM,	/**< Memory allocation error		*/
 } jwt_value_error_t;
 
-/** @ingroup jwt_claims_grp
- * @brief Data type for get and add actions for JWT headers and grants
+/** @ingroup jwt_claims_helpers_grp
+ * @brief Data type for get and add actions for JWT headers and claims
  *
  * This is used for both add and get requests. Specific rules for each type is
  * described in more detail for the add and get requests.
@@ -241,7 +241,7 @@ typedef struct {
  */
 typedef int (*jwt_callback_t)(jwt_t *, jwt_config_t *);
 
-/** @ingroup jwt_claims_grp
+/** @ingroup jwt_claims_helpers_grp
  * @brief WFC defined claims
  */
 typedef enum {
@@ -258,12 +258,12 @@ typedef enum {
         JWT_CLAIMS_ALL          = 0x80fe, /**< Mask of all claims           */
 } jwt_claims_t;
 
-/** @ingroup jwt_claims_grp
+/** @ingroup jwt_claims_helpers_grp
  * @brief Default validations
  *
  * Beyond the normal validations (e.g. algorithm, and signature checks) these
- * are the ones that will be performed if the grants exist in the JWT. If the
- * grants do not exist, the validation will be ignores.
+ * are the ones that will be performed if the claims exist in the JWT. If the
+ * claims do not exist, the validation will be ignores.
  *
  * @note If you do not set any validation flags (JWT_VALIDATION_EMPTY), these
  * will be used. If you do not want them used, them you must set
@@ -271,7 +271,7 @@ typedef enum {
  */
 #define JWT_CHECKER_CLAIMS (JWT_CLAIM_EXP|JWT_CLAIM_NBF)
 
-/** @ingroup jwt_claims_grp
+/** @ingroup jwt_claims_helpers_grp
  * @brief Default claims for builders
  */
 #define JWT_BUILDER_CLAIMS (JWT_CLAIM_IAT)
@@ -291,7 +291,7 @@ typedef enum {
  */
 
 /**
- * @brief Opaque Builde Object
+ * @brief Opaque Builder Object
  */
 typedef struct jwt_builder jwt_builder_t;
 
@@ -398,11 +398,11 @@ int jwt_builder_setkey(jwt_builder_t *builder, const jwt_alg_t alg,
  * in order to be enforced.
  *
  * @param builder Pointer to a builder object
- * @param grants A bitwise set of values in jwt_claims_t
+ * @param claims A bitwise set of values in jwt_claims_t
  * @return 0 on success, non-zero otherwise with error set in the builder
  */
 JWT_EXPORT
-int jwt_builder_setclaims(jwt_builder_t *builder, jwt_claims_t grants);
+int jwt_builder_setclaims(jwt_builder_t *builder, jwt_claims_t claims);
 
 /**
  * @brief Set a callback for generating tokens
@@ -604,11 +604,11 @@ int jwt_checker_setkey(jwt_checker_t *checker, const jwt_alg_t alg, const
  * @note This replaces the current flags completely.
  *
  * @param checker Pointer to a checker object
- * @param grants A bitwise set of values in jwt_claims_t
+ * @param claims A bitwise set of values in jwt_claims_t
  * @return 0 on success, non-zero otherwise with error set in the checker
  */
 JWT_EXPORT
-int jwt_checker_setclaims(jwt_checker_t *checker, jwt_claims_t grants);
+int jwt_checker_setclaims(jwt_checker_t *checker, jwt_claims_t claims);
 
 /**
  * @brief Set a callback for generating tokens
@@ -928,7 +928,7 @@ JWT_EXPORT
 jwt_value_error_t jwt_header_del(jwt_t *jwt, const char *header);
 
 /**
- * @brief Add a value to the grants of a JWT
+ * @brief Add a value to the claims of a JWT
  *
  * See jwt_header_add() for detailed description.
  *
@@ -938,10 +938,10 @@ jwt_value_error_t jwt_header_del(jwt_t *jwt, const char *header);
  *  value.error field will match this return value.
  */
 JWT_EXPORT
-jwt_value_error_t jwt_grant_add(jwt_t *jwt, jwt_value_t *value);
+jwt_value_error_t jwt_claim_add(jwt_t *jwt, jwt_value_t *value);
 
 /**
- * @brief Get a value from the grants of a JWT
+ * @brief Get a value from the claims of a JWT
  *
  * See jwt_header_get() for detailed description.
  *
@@ -951,19 +951,19 @@ jwt_value_error_t jwt_grant_add(jwt_t *jwt, jwt_value_t *value);
  *  value.error field will match this return value.
  */
 JWT_EXPORT
-jwt_value_error_t jwt_grant_get(jwt_t *jwt, jwt_value_t *value);
+jwt_value_error_t jwt_claim_get(jwt_t *jwt, jwt_value_t *value);
 
 /**
- * @brief Delete a value from the grants of a JWT
+ * @brief Delete a value from the claims of a JWT
  *
- * See jwt_grant_get() for detailed description.
+ * See jwt_claim_get() for detailed description.
  *
  * @param jwt Pointer to a jwt_t token, previously created with jwt_create()
- * @param header The name of the grant to delete, or NULL to clear all grants
+ * @param header The name of the claim to delete, or NULL to clear all claims
  * @return A jwt_value_error_t value, JWT_VALUE_ERR_NONE being success.
  */
 JWT_EXPORT
-jwt_value_error_t jwt_grant_del(jwt_t *jwt, const char *header);
+jwt_value_error_t jwt_claim_del(jwt_t *jwt, const char *header);
 
 /**
  * @}
@@ -1413,7 +1413,7 @@ int jwks_item_free_all(jwk_set_t *jwk_set);
  */
 
  /**
-  * Set functions to be used for allocating and freeing memory.
+  * @brief Set functions to be used for memory management
   *
   * By default, LibJWT uses malloc, realloc, and free for memory
   * management. This function allows the user of the library to
@@ -1460,8 +1460,8 @@ void jwt_get_alloc(jwt_malloc_t *pmalloc, jwt_realloc_t *prealloc,
  * @defgroup jwt_crypto_grp Cryptographic Ops
  * Functions used to set and get which crypto operations are used
  *
- * LibJWT supports several crypto libraries, mainly "openssl" and "gnutls".
- * By default, if enabled, "openssl" is used.
+ * LibJWT supports several crypto libraries, mainly "openssl", "gnutls",
+ * and "mbedtls". By default, "openssl" is used.
  *
  * @warning Changing the crypto operations is not thread safe. You must
  *   protect changing them with some sort of lock, including locking
