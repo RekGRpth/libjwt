@@ -253,7 +253,7 @@ typedef enum {
         JWT_CLAIM_EXP           = 0x0010, /**< @rfc_t{7519,4.1.4} ``"exp"`` */
         JWT_CLAIM_NBF           = 0x0020, /**< @rfc_t{7519,4.1.5} ``"nbf"`` */
         JWT_CLAIM_IAT           = 0x0040, /**< @rfc_t{7519,4.1.6} ``"iat"`` */
-        JWT_CLAIM_JTI           = 0x0080, /**< @rfc_t{7519,4.1.7} ``"nbf"`` */
+        JWT_CLAIM_JTI           = 0x0080, /**< @rfc_t{7519,4.1.7} ``"jti"`` */
         JWT_CLAIMS_ENFORCE      = 0x8000, /**< Fail if claim is missing     */
         JWT_CLAIMS_ALL          = 0x80fe, /**< Mask of all claims           */
 } jwt_claims_t;
@@ -802,6 +802,28 @@ jwt_value_error_t jwt_builder_claim_get(jwt_builder_t *builder, jwt_value_t
 JWT_EXPORT
 jwt_value_error_t jwt_builder_claim_del(jwt_builder_t *builder, const char
 					*header);
+
+/**
+ * @todo Document these
+ */
+JWT_EXPORT
+int jwt_builder_time_offset_set(jwt_builder_t *builder, jwt_claims_t claim,
+				time_t secs);
+
+
+/**
+ * @todo Document these
+ */
+JWT_EXPORT
+time_t jwt_builder_time_offset_get(jwt_builder_t *builder, jwt_claims_t claim);
+
+
+/**
+ * @todo Document these
+ */
+JWT_EXPORT
+int jwt_builder_time_offset_clear(jwt_builder_t *builder, jwt_claims_t claim);
+
 /**
  * @}
  * @noop jwt_claims_builder_grp
@@ -829,6 +851,29 @@ jwt_value_error_t jwt_checker_claim_get(jwt_checker_t *checker, jwt_value_t
 JWT_EXPORT
 jwt_value_error_t jwt_checker_claim_del(jwt_checker_t *checker, const char
 					*header);
+
+
+/**
+ * @todo Document these
+ */
+JWT_EXPORT
+int jwt_checker_leeway_set(jwt_checker_t *checker, jwt_claims_t claim,
+			   time_t secs);
+
+
+/**
+ * @todo Document these
+ */
+JWT_EXPORT
+time_t jwt_checker_leeway_get(jwt_checker_t *checker, jwt_claims_t claim);
+
+
+/**
+ * @todo Document these
+ */
+JWT_EXPORT
+int jwt_checker_leeway_clear(jwt_checker_t *checker, jwt_claims_t claim);
+
 /**
  * @}
  * @noop jwt_claims_checker_grp

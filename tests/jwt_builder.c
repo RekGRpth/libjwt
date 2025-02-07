@@ -105,6 +105,7 @@ END_TEST
 START_TEST(null_handling)
 {
 	jwt_builder_t *builder = NULL;
+	jwt_value_t jval;
 	const char *out;
 	jwk_item_t *key = NULL;
 	int ret;
@@ -169,6 +170,28 @@ START_TEST(null_handling)
 
 	ret = jwt_builder_setcb(builder, NULL, "test");
 	ck_assert_int_ne(ret, 0);
+
+	ret = jwt_builder_header_del(NULL, NULL);
+	ck_assert_int_ne(ret, 0);
+
+	ret = jwt_checker_claim_del(NULL, NULL);
+	ck_assert_int_ne(ret, 0);
+
+	ret = jwt_checker_claim_add(NULL, &jval);
+	ck_assert_int_ne(ret, 0);
+
+	ret = jwt_checker_claim_get(NULL, NULL);
+	ck_assert_int_ne(ret, 0);
+
+	/* Random */
+	ck_assert_int_eq(jwt_str_alg(NULL), JWT_ALG_INVAL);
+
+	out = jwt_alg_str(JWT_ALG_ES256K);
+	ck_assert_str_eq(out, "ES256K");
+
+	ck_assert_ptr_null(jwt_alg_str(JWT_ALG_INVAL));
+
+	ck_assert_int_eq(jwt_get_alg(NULL), JWT_ALG_INVAL);
 }
 END_TEST
 
@@ -397,8 +420,7 @@ END_TEST
 
 START_TEST(claim_str_addgetdel)
 {
-	const char exp[] = "eyJhbGciOiJub25lIn0.eyJpc3MiOiJka"
-		"XNrLnN3aXNzZGlzay5jb20ifQ.";
+	const char exp[] = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJteS1mcmllbmQifQ.";
 	jwt_builder_auto_t *builder = NULL;
 	char_auto *out = NULL;
 	jwt_value_t jval;
@@ -413,7 +435,7 @@ START_TEST(claim_str_addgetdel)
 	ret = jwt_builder_setclaims(builder, JWT_CLAIM_NONE);
 	ck_assert_int_eq(ret, 0);
 
-	jwt_set_ADD_STR(&jval, "iss", "disk.swissdisk.com");
+	jwt_set_ADD_STR(&jval, "sub", "my-friend");
 	ret = jwt_builder_claim_add(builder, &jval);
 	ck_assert_int_eq(ret, 0);
 
