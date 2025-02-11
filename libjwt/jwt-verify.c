@@ -135,27 +135,22 @@ static int __check_str_claim(jwt_t *jwt, jwt_claims_t claim, char *claim_str)
 	jwt_value_t jval;
 	const char *str;
 	jwt_value_error_t err;
-	int enforce = checker->c.claims & JWT_CLAIMS_ENFORCE;
-	int ret = 0;
 
-	if (checker->c.claims & claim) {
-		jwt_set_GET_STR(&jval, claim_str);
-		err = jwt_checker_claim_get(checker, &jval);
-		str = jval.str_val;
+	if (!(checker->c.claims & claim))
+		return 0;
 
-		if (err == JWT_VALUE_ERR_NONE) {
-			jwt_set_GET_STR(&jval, claim_str);
-			err = jwt_claim_get(jwt, &jval);
-		}
+	str = jwt_checker_claim_get(checker, claim);
+	if (str == NULL)
+		return 1; // LCOV_EXCL_LINE
+			  // Check above makes this nearly impossible to hit
 
-		if (err == JWT_VALUE_ERR_NONE) {
-			if (strcmp(str, jval.str_val))
-				ret = 1;
-		} else if (enforce)
-			ret = 1;
-	}
+	jwt_set_GET_STR(&jval, claim_str);
+	err = jwt_claim_get(jwt, &jval);
 
-	return ret;
+	if (err != JWT_VALUE_ERR_NONE || strcmp(str, jval.str_val))
+		return 1;
+
+	return 0;
 }
 
 static jwt_claims_t __verify_claims(jwt_t *jwt)
@@ -164,7 +159,6 @@ static jwt_claims_t __verify_claims(jwt_t *jwt)
 	jwt_value_t jval;
 	time_t now = time(NULL);
 	jwt_value_error_t err;
-	int enforce = checker->c.claims & JWT_CLAIMS_ENFORCE;
 	jwt_claims_t failed = 0;
 
 	/* expiration in past */
@@ -173,10 +167,11 @@ static jwt_claims_t __verify_claims(jwt_t *jwt)
 		err = jwt_claim_get(jwt, &jval);
 
 		if (err == JWT_VALUE_ERR_NONE) {
-			if (jval.int_val < (now - checker->c.exp))
+			if (jval.int_val <= (now - checker->c.exp)) {
 				failed |= JWT_CLAIM_EXP;
-		} else if (enforce)
-			failed |= JWT_CLAIM_EXP;
+			}
+		} else if (err != JWT_VALUE_ERR_NOEXIST)
+			failed |= JWT_CLAIM_EXP; // LVOC_EXCL_LINE
 	}
 
 	/* not valid before now */
@@ -185,10 +180,11 @@ static jwt_claims_t __verify_claims(jwt_t *jwt)
 		err = jwt_claim_get(jwt, &jval);
 
 		if (err == JWT_VALUE_ERR_NONE) {
-			if (jval.int_val > (now + checker->c.nbf))
+			if (jval.int_val > (now + checker->c.nbf)) {
 				failed |= JWT_CLAIM_NBF;
-		} else if (enforce)
-			failed |= JWT_CLAIM_NBF;
+			}
+		} else if (err != JWT_VALUE_ERR_NOEXIST)
+			failed |= JWT_CLAIM_NBF; // LVOC_EXCL_LINE
 	}
 
 	/* issuer doesn't match */
