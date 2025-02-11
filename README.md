@@ -6,9 +6,7 @@
 [![maClara](https://img.shields.io/badge/Sponsored%20by-maClara%2C%20LLC-blue?style=plastic&logoColor=blue)](https://maclara-llc.com)
 
 > [!WARNING]
-> The current LibJWT code is under heavy reconstruction and is changing
-> wildly from the API and ABI of v2 and prior. There's still a lot going on here,
-> and there are no guarantees that this new API is set in stone. Users beware.
+> Version 3 of LibJWT is a complete overhaul of the code. Please see documentation for usage.
 
 ## :bulb: Supported Standards
 
@@ -64,9 +62,9 @@ JWS Algorithm ``alg``         | OpenSSL            | GnuTLS             | MbedTL
 
 ## :books: Docs and Source
 
-:link: [Current codebase](https://libjwt.io)
+:link: [Current Docs](https://libjwt.io)
 
-:link: [Stable](https://libjwt.io/stable)
+:link: [Legacy Docs v2.1.1](https://libjwt.io/stable)
 
 :link: [GitHub Repo](https://github.com/benmcollins/libjwt)
 
