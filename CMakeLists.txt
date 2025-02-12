@@ -18,6 +18,7 @@ project(${LIBJWT_PROJECT}
 	HOMEPAGE_URL ${LIBJWT_HOMEPAGE_URL}
 	LANGUAGES C)
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_compile_options(-Wall -Werror -Wextra -Wunused)
 
 # Must be set after the above
@@ -70,10 +71,12 @@ set(JWT_SOURCES libjwt/base64.c
 add_library(builder OBJECT)
 target_sources(builder PRIVATE libjwt/jwt-common.c)
 target_compile_definitions(builder PRIVATE JWT_BUILDER)
+set_property(TARGET builder PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 add_library(checker OBJECT)
 target_sources(checker PRIVATE libjwt/jwt-common.c)
 target_compile_definitions(checker PRIVATE JWT_CHECKER)
+set_property(TARGET checker PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 target_link_libraries(jwt PRIVATE builder checker)
 target_link_libraries(jwt_static PRIVATE builder checker)
@@ -237,6 +240,7 @@ if (WITH_TESTS)
 		set(CHECK_REQUIRED REQUIRED)
 	endif()
 	pkg_check_modules(CHECK check>=0.9.10 IMPORTED_TARGET ${CHECK_REQUIRED})
+	find_program (BATS_CMD bats)
 else()
 	if (ENABLE_COVERAGE)
 		message(SEND_ERROR "You must set WITH_TESTS=ON to enable code coverage")
@@ -276,6 +280,10 @@ if (CHECK_FOUND)
 	foreach (TEST ${UNIT_TESTS})
 		jwt_add_test(NAME ${TEST})
 	endforeach()
+
+	if (BATS_CMD)
+		add_test(NAME jwt_cli COMMAND /bin/bash -c "export SRCDIR=\"${CMAKE_SOURCE_DIR}\"; \"${CMAKE_SOURCE_DIR}\"/tests/jwt-cli.bats")
+	endif()
 
 	add_custom_target(check
 		COMMAND ${CMAKE_CTEST_COMMAND}
