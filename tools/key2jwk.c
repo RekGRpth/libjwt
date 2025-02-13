@@ -28,6 +28,8 @@
 
 #include <jwt.h>
 
+#include "jwt-util.h"
+
 /* We make use of some LibJWT internals. Soon, this code will move into LibJWT
  * so it can be used to important PEM/DER keys into a JWK keyring. Until then,
  * we hack around it here. */
@@ -109,8 +111,8 @@ static void ec_alg_type(EVP_PKEY *pkey, char crv[32], char alg[32])
 	}
 
 	if (!__alg || !__crv) {
-		fprintf(stderr, "EC: Unknown curve %s with %ld bits\n",
-			__named_crv, bits);
+		fprintf(stderr, "EC: Unknown curve %s with %d bits\n",
+			__named_crv, (int)bits);
 		return;
 	}
 
@@ -327,8 +329,6 @@ static json_t *parse_one_file(const char *file)
 	return jwk;
 }
 
-extern const char *__progname;
-
 _Noreturn static void usage(const char *error, int exit_state)
 {
 	if (error)
@@ -360,7 +360,7 @@ RSA-PSS keys will be set to PS256, otherwise they will look no different\n\
 than an RSA key.\n\
 \n\
 All keys will get a generated randomized uuidv4 \"kid\" attribute unless you\n\
-use the -k option..\n", __progname);
+use the -k option..\n", get_progname());
 
 	exit(exit_state);
 }
@@ -480,7 +480,12 @@ int main(int argc, char **argv)
 	time_str[strlen(time_str) - 1] = '\0';
 	json_object_set_new(jwk_set, "libjwt.io:date", json_string(time_str));
 
+#ifdef _WIN32
+	DWORD hostnamesize = sizeof(comment);
+	GetComputerNameA(comment, &hostnamesize);
+#else
 	gethostname(comment, sizeof(comment));
+#endif
 	comment[sizeof(comment) - 1] = '\0';
 	json_object_set_new(jwk_set, "libjwt.io:hostname",
 			    json_string(comment));

@@ -6,25 +6,20 @@
    License, v. 2.0. If a copy of the MPL was not distributed with this
    file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
-#include <stdlib.h>
-#include <string.h>
-#include <stdio.h>
-
-#include <jwt.h>
-
-#include "base64.h"
-
-#include "jwt-private.h"
+/* XXX This file is used to generate jwt-builder.i and jwt-checker.i */
 
 #ifdef JWT_BUILDER
 #define jwt_common_t	jwt_builder_t
 #define FUNC(__x)	jwt_builder_##__x
 #define CLAIMS_DEF	JWT_CLAIM_IAT
+#define __DISABLE	0
 #endif
+
 #ifdef JWT_CHECKER
 #define jwt_common_t	jwt_checker_t
 #define FUNC(__x)	jwt_checker_##__x
 #define CLAIMS_DEF	(JWT_CLAIM_EXP | JWT_CLAIM_NBF)
+#define __DISABLE	-1
 #endif
 
 #ifndef jwt_common_t
@@ -191,22 +186,26 @@ static jwt_value_error_t __run_it(jwt_common_t *__cmd, _setget_type_t type,
 				  jwt_value_t *value, __doer_t doer)
 {
 	json_t *which = NULL;
-
+#ifdef JWT_BUILDER
 	if (!__cmd || !value) {
 		if (value)
 			return value->error = JWT_VALUE_ERR_INVALID;
 		return JWT_VALUE_ERR_INVALID;
 	}
-
+#endif
 	switch (type) {
+#ifdef JWT_BUILDER
 	case __HEADER:
 		which = __cmd->c.headers;
 		break;
+#endif
 	case __CLAIM:
 		which = __cmd->c.payload;
 		break;
+	// LCOV_EXCL_START
 	default:
-		return value->error = JWT_VALUE_ERR_INVALID; // LCOV_EXCL_LINE
+		return value->error = JWT_VALUE_ERR_INVALID;
+	// LCOV_EXCL_STOP
 	}
 
 	return doer(which, value);
@@ -321,13 +320,9 @@ int FUNC(claim_del)(jwt_common_t *__cmd, jwt_claims_t type)
 
 /* Time offsets */
 #ifdef JWT_BUILDER
-#define __DISABLE 0
-#else
-#define __DISABLE -1
-#endif
-#ifdef JWT_BUILDER
 int FUNC(time_offset)(jwt_common_t *__cmd, jwt_claims_t claim, time_t secs)
-#else
+#endif
+#ifdef JWT_CHECKER
 int FUNC(time_leeway)(jwt_common_t *__cmd, jwt_claims_t claim, time_t secs)
 #endif
 {
@@ -474,7 +469,7 @@ char *FUNC(generate)(jwt_common_t *__cmd)
 	jwt->key = config.key;
 
 	if (jwt_head_setup(jwt))
-		return NULL;
+		return NULL; // LCOV_EXCL_LINE
 
 	out = jwt_encode_str(jwt);
 	jwt_copy_error(__cmd, jwt);

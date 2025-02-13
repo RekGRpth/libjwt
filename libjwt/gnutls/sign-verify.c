@@ -47,8 +47,10 @@ static int gnutls_sign_sha_hmac(jwt_t *jwt, char **out, unsigned int *len,
 	case JWT_ALG_HS512:
 		alg = GNUTLS_DIG_SHA512;
 		break;
+	// LCOV_EXCL_START
 	default:
-		return 1; // LCOV_EXCL_LINE
+		return 1;
+	// LCOV_EXCL_STOP
 	}
 
 	*len = gnutls_hmac_get_len(alg);
@@ -65,28 +67,6 @@ static int gnutls_sign_sha_hmac(jwt_t *jwt, char **out, unsigned int *len,
 	}
 
 	return 0;
-}
-
-static int gnutls_verify_sha_hmac(jwt_t *jwt, const char *head,
-				  unsigned int head_len, const char *sig)
-{
-	char *sig_check, *buf = NULL;
-	unsigned int len;
-	int ret;
-
-	if (gnutls_sign_sha_hmac(jwt, &sig_check, &len, head, head_len))
-		return 1; // LCOV_EXCL_LINE
-
-	ret = jwt_base64uri_encode(&buf, sig_check, len);
-	if (ret <= 0 || buf == NULL)
-		return 1; // LCOV_EXCL_LINE
-
-	ret = jwt_strcmp(sig, buf);
-
-	jwt_freemem(buf);
-	jwt_freemem(sig_check);
-
-	return ret;
 }
 
 #define SIGN_ERROR(_msg) { jwt_write_error(jwt, "JWT[GnuTLS]: " _msg); goto sign_clean_privkey; }
@@ -187,9 +167,10 @@ static int gnutls_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 			SIGN_ERROR("Unknown EdDSA key"); // LCOV_EXCL_LINE
 		}
 		break;
-
+	// LCOV_EXCL_START
 	default:
-		SIGN_ERROR("Unknown signing alg"); // LCOV_EXCL_LINE
+		SIGN_ERROR("Unknown signing alg");
+	// LCOV_EXCL_STOP
 	}
 
 	if (pk_alg == GNUTLS_PK_RSA_PSS) {
@@ -271,7 +252,8 @@ sign_clean_privkey:
 #define VERIFY_ERROR(_msg) { jwt_write_error(jwt, "JWT[GnuTLS]: " _msg); goto verify_clean_sig; }
 
 static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
-				 unsigned int head_len, const char *sig_b64)
+				 unsigned int head_len, unsigned char *sig,
+				 int sig_len)
 {
 	gnutls_datum_t r, s;
 	gnutls_datum_t data = {
@@ -280,11 +262,10 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 	};
 	gnutls_datum_t sig_dat = { NULL, 0 };
 	gnutls_pubkey_t pubkey;
-	int alg, ret = 0, sig_len;
-	unsigned char *sig = NULL;
+	int alg, ret = 0;
 
 	if (gnutls_pubkey_init(&pubkey))
-		VERIFY_ERROR("Failed initializing pubkey") // LCOV_EXCL_LINE
+		VERIFY_ERROR("Failed initializing pubkey"); // LCOV_EXCL_LINE
 
 	if (jwt->key->pem == NULL)
 		return 1;
@@ -295,10 +276,10 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 	};
 
 	if (jwt->alg == JWT_ALG_ES256K)
-		VERIFY_ERROR("ES256K not supported") // LCOV_EXCL_LINE
+		VERIFY_ERROR("ES256K not supported"); // LCOV_EXCL_LINE
 
 	if (gnutls_pubkey_init(&pubkey))
-		VERIFY_ERROR("Error initializing pubkey") // LCOV_EXCL_LINE
+		VERIFY_ERROR("Error initializing pubkey"); // LCOV_EXCL_LINE
 
 	ret = gnutls_pubkey_import(pubkey, &cert_dat, GNUTLS_X509_FMT_PEM);
 	if (ret) {
@@ -308,20 +289,20 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 		 * This is perfectly legit. A JWK can have a private key with
 		 * key_ops of SIGN and VERIFY. */
 		if (gnutls_privkey_init(&privkey))
-			VERIFY_ERROR("Failed initializing privkey") // LCOV_EXCL_LINE
+			VERIFY_ERROR("Failed initializing privkey"); // LCOV_EXCL_LINE
 
 		/* Try loading as a private key, and extracting the pubkey */
 		if (gnutls_privkey_import_x509_raw(privkey, &cert_dat,
 						   GNUTLS_X509_FMT_PEM,
 						   NULL, 0)) {
-			VERIFY_ERROR("Failed importing key") // LCOV_EXCL_LINE
+			VERIFY_ERROR("Failed importing key"); // LCOV_EXCL_LINE
 		}
 
 		ret = gnutls_pubkey_import_privkey(pubkey, privkey, 0, 0);
 		gnutls_privkey_deinit(privkey);
 
 		if (ret)
-			VERIFY_ERROR("Failed to import key") // LCOV_EXCL_LINE
+			VERIFY_ERROR("Failed to import key"); // LCOV_EXCL_LINE
 	}
 
 	switch (jwt->alg) {
@@ -367,17 +348,14 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 		else if (alg == GNUTLS_PK_EDDSA_ED448) {
 			alg = GNUTLS_SIGN_EDDSA_ED448;
 		} else {
-			VERIFY_ERROR("Unknown EdDSA key type") // LCOV_EXCL_LINE
+			VERIFY_ERROR("Unknown EdDSA key type"); // LCOV_EXCL_LINE
 		}
 		break;
-
+	// LCOV_EXCL_START
 	default:
-		VERIFY_ERROR("Unknown alg") // LCOV_EXCL_LINE
+		VERIFY_ERROR("Unknown alg");
+	// LCOV_EXCL_STOP
 	}
-
-	sig = (unsigned char *)jwt_base64uri_decode(sig_b64, &sig_len);
-	if (sig == NULL)
-		VERIFY_ERROR("Error decoding signature") // LCOV_EXCL_LINE
 
 	/* Rebuild signature using r and s extracted from sig when jwt->alg
 	 * is ESxxx. */
@@ -403,7 +381,7 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 			s.size = 66;
 			s.data = sig + 66;
 		} else {
-			VERIFY_ERROR("Irregular sig_len for ECDHA") // LCOV_EXCL_LINE
+			VERIFY_ERROR("Irregular sig_len for ECDHA"); // LCOV_EXCL_LINE
 		}
 
 		if (gnutls_encode_rs_value(&sig_dat, &r, &s) ||
@@ -414,7 +392,7 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 			gnutls_free(sig_dat.data);
 
 		if (ret)
-			VERIFY_ERROR("Could not encode R/S values for ECDHA") // LCOV_EXCL_LINE
+			VERIFY_ERROR("Could not encode R/S values for ECDHA"); // LCOV_EXCL_LINE
 		break;
 
 	default:
@@ -423,12 +401,11 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 		sig_dat.data = sig;
 
 		if (gnutls_pubkey_verify_data2(pubkey, alg, 0, &data, &sig_dat))
-			VERIFY_ERROR("Failed to verify signature") // LCOV_EXCL_LINE
+			VERIFY_ERROR("Failed to verify signature"); // LCOV_EXCL_LINE
 	}
 
 verify_clean_sig:
 	gnutls_pubkey_deinit(pubkey);
-	jwt_freemem(sig);
 
 	return ret;
 }
@@ -439,7 +416,6 @@ struct jwt_crypto_ops jwt_gnutls_ops = {
 	.provider		= JWT_CRYPTO_OPS_GNUTLS,
 
 	.sign_sha_hmac		= gnutls_sign_sha_hmac,
-	.verify_sha_hmac	= gnutls_verify_sha_hmac,
 	.sign_sha_pem		= gnutls_sign_sha_pem,
 	.verify_sha_pem		= gnutls_verify_sha_pem,
 

@@ -275,9 +275,10 @@ static int __check_hmac(jwt_t *jwt)
 		jwt_write_error(jwt, "Key too short for HS512: %d bits",
 				key_bits);
 		break;
-
+	// LCOV_EXCL_START
 	default:
-		return 1; // LCOV_EXCL_LINE
+		return 1;
+	// LCOV_EXCL_STOP
 	}
 
 	return 1;
@@ -329,12 +330,13 @@ static int __check_key_bits(jwt_t *jwt)
 		jwt_write_error(jwt, "Key needs to be 521 bits: %d bits",
 				key_bits);
 		break;
-
+	// LCOV_EXCL_START
 	default:
-		return 1; // LCOV_EXCL_LINE
+		break;
+	// LCOV_EXCL_STOP
 	}
 
-	return 1;
+	return 1; // LCOV_EXCL_LINE
 }
 
 int jwt_sign(jwt_t *jwt, char **out, unsigned int *len, const char *str,
@@ -382,23 +384,56 @@ int jwt_sign(jwt_t *jwt, char **out, unsigned int *len, const char *str,
 		}
 
 	/* You wut, mate? */
+	// LCOV_EXCL_START
 	default:
-		// LCOV_EXCL_START
 		jwt_write_error(jwt, "Unknown algorigthm");
 		return 1;
-		// LCOV_EXCL_STOP
+	// LCOV_EXCL_STOP
 	}
 }
 
-jwt_t *jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
-		      const char *sig)
+static int _verify_sha_hmac(jwt_t *jwt, const char *head,
+			    unsigned int head_len, const char *sig)
 {
+	char *res;
+	unsigned int res_len;
+	char *buf = NULL;
+	int ret;
+
+	ret = jwt_ops->sign_sha_hmac(jwt, &res, &res_len, head, head_len);
+	if (ret)
+		return ret; // LCOV_EXCL_LINE
+
+	ret = jwt_base64uri_encode(&buf, (char *)res, res_len);
+	if (ret <= 0) {
+		// LCOV_EXCL_START
+		jwt_freemem(res);
+		return -ret;
+		// LCOV_EXCL_STOP
+	}
+
+	ret = jwt_strcmp(buf, sig) ? 1 : 0;
+	jwt_freemem(buf);
+	jwt_freemem(res);
+
+	/* And now... */
+	return ret;
+}
+
+jwt_t *jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
+		      const char *sig_b64)
+{
+	int sig_len;
+	unsigned char *sig;
+
+	sig = jwt_base64uri_decode(sig_b64, &sig_len);
+
 	switch (jwt->alg) {
 	/* HMAC */
 	case JWT_ALG_HS256:
 	case JWT_ALG_HS384:
 	case JWT_ALG_HS512:
-		if (jwt_ops->verify_sha_hmac(jwt, head, head_len, sig))
+		if (_verify_sha_hmac(jwt, head, head_len, sig_b64))
 			jwt_write_error(jwt, "Token failed verification");
 		break;
 
@@ -420,13 +455,23 @@ jwt_t *jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
 
 	/* EdDSA */
 	case JWT_ALG_EDDSA:
-		if (jwt_ops->verify_sha_pem(jwt, head, head_len, sig))
+		sig = jwt_base64uri_decode(sig_b64, &sig_len);
+		if (sig == NULL) {
+			jwt_write_error(jwt, "Error decoding signature");
+			return jwt;
+		}
+
+		if (jwt_ops->verify_sha_pem(jwt, head, head_len, sig, sig_len))
 			jwt_write_error(jwt, "Token failed verification");
+
+		jwt_freemem(sig);
 		break;
 
 	/* You wut, mate? */
+	// LCOV_EXCL_START
 	default:
-		jwt_write_error(jwt, "Unknown algorigthm"); // LCOV_EXCL_LINE
+		jwt_write_error(jwt, "Unknown algorigthm");
+	// LCOV_EXCL_STOP
 	}
 
 	return jwt;

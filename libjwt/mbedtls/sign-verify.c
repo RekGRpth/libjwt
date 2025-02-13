@@ -88,34 +88,6 @@ static int mbedtls_sign_sha_hmac(jwt_t *jwt, char **out, unsigned int *len,
 	return 0;
 }
 
-static int mbedtls_verify_sha_hmac(jwt_t *jwt, const char *head,
-				   unsigned int head_len, const char *sig)
-{
-	char *res;
-	unsigned int res_len;
-	char *buf = NULL;
-	int ret;
-
-	ret = mbedtls_sign_sha_hmac(jwt, &res, &res_len, head, head_len);
-	if (ret)
-		return ret; // LCOV_EXCL_LINE
-
-	ret = jwt_base64uri_encode(&buf, (char *)res, res_len);
-	if (ret <= 0) {
-		// LCOV_EXCL_START
-		jwt_freemem(res);
-		return -ret;
-		// LCOV_EXCL_STOP
-	}
-
-	ret = jwt_strcmp(buf, sig) ? 1 : 0;
-	jwt_freemem(buf);
-	jwt_freemem(res);
-
-	/* And now... */
-	return ret;
-}
-
 #define SIGN_ERROR(_msg) { jwt_write_error(jwt, "JWT[MbedTLS]: " _msg); goto sign_clean_key; }
 
 static int mbedtls_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
@@ -277,13 +249,12 @@ sign_clean_key:
 #define VERIFY_ERROR(_msg) { jwt_write_error(jwt, "JWT[MbedTLS]: " _msg); goto verify_clean_key; }
 
 static int mbedtls_verify_sha_pem(jwt_t *jwt, const char *head,
-				  unsigned int head_len, const char *sig_b64)
+				  unsigned int head_len,
+				  unsigned char *sig, int sig_len)
 {
 	mbedtls_pk_context pk;
 	unsigned char hash[MBEDTLS_MD_MAX_SIZE];
 	const mbedtls_md_info_t *md_info = NULL;
-	unsigned char *sig = NULL;
-	size_t sig_len = 0;
 	int ret = 1;
 
 	mbedtls_pk_init(&pk);
@@ -333,11 +304,6 @@ static int mbedtls_verify_sha_pem(jwt_t *jwt, const char *head,
 	if ((ret = mbedtls_md(md_info, (const unsigned char *)head, head_len,
 			      hash)))
 		VERIFY_ERROR("Failed to computer hash"); // LCOV_EXCL_LINE
-
-	/* Decode the base64url signature */
-	sig = jwt_base64uri_decode(sig_b64, (int *)&sig_len);
-	if (sig == NULL)
-		VERIFY_ERROR("Failed to decode signature"); // LCOV_EXCL_LINE
 
 	/* Handle ECDSA R/S format conversion */
 	if (mbedtls_pk_can_do(&pk, MBEDTLS_PK_ECDSA)) {
@@ -390,7 +356,6 @@ static int mbedtls_verify_sha_pem(jwt_t *jwt, const char *head,
 	}
 
 verify_clean_key:
-	jwt_freemem(sig);
 	mbedtls_pk_free(&pk);
 
 	return jwt->error;
@@ -402,7 +367,6 @@ struct jwt_crypto_ops jwt_mbedtls_ops = {
 	.provider		= JWT_CRYPTO_OPS_MBEDTLS,
 
 	.sign_sha_hmac		= mbedtls_sign_sha_hmac,
-	.verify_sha_hmac	= mbedtls_verify_sha_hmac,
 	.sign_sha_pem		= mbedtls_sign_sha_pem,
 	.verify_sha_pem		= mbedtls_verify_sha_pem,
 

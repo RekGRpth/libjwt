@@ -53,8 +53,10 @@ static int openssl_sign_sha_hmac(jwt_t *jwt, char **out, unsigned int *len,
 	case JWT_ALG_HS512:
 		alg = EVP_sha512();
 		break;
+	// LCOV_EXCL_START
 	default:
-		return 1; // LCOV_EXCL_LINE
+		return 1;
+	// LCOV_EXCL_STOP
 	}
 
 	*out = jwt_malloc(EVP_MAX_MD_SIZE);
@@ -71,34 +73,6 @@ static int openssl_sign_sha_hmac(jwt_t *jwt, char **out, unsigned int *len,
 	}
 
 	return 0;
-}
-
-static int openssl_verify_sha_hmac(jwt_t *jwt, const char *head,
-				   unsigned int head_len, const char *sig)
-{
-	char *res;
-	unsigned int res_len;
-	char *buf = NULL;
-	int ret;
-
-	ret = openssl_sign_sha_hmac(jwt, &res, &res_len, head, head_len);
-	if (ret)
-		return ret; // LCOV_EXCL_LINE
-
-	ret = jwt_base64uri_encode(&buf, (char *)res, res_len);
-	if (ret <= 0) {
-		// LCOV_EXCL_START
-		jwt_freemem(res);
-		return -ret;
-		// LCOV_EXCL_STOP
-	}
-
-	ret = jwt_strcmp(buf, sig) ? 1 : 0;
-	jwt_freemem(buf);
-	jwt_freemem(res);
-
-	/* And now... */
-	return ret;
 }
 
 static int jwt_ec_d2i(jwt_t *jwt, char **out, unsigned int *len,
@@ -222,8 +196,10 @@ static int openssl_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 			SIGN_ERROR("Unknown EdDSA curve"); // LCOV_EXCL_LINE
 		break;
 
+	// LCOV_EXCL_START
 	default:
-		return 1; // LCOV_EXCL_LINE
+		return 1;
+	// LCOV_EXCL_STOP
 	}
 
 	if (type == EVP_PKEY_RSA_PSS) {
@@ -296,9 +272,9 @@ jwt_sign_sha_pem_done:
 #define VERIFY_ERROR(_msg) { jwt_write_error(jwt, "JWT[OpenSSL]: " _msg); goto jwt_verify_sha_pem_done; }
 
 static int openssl_verify_sha_pem(jwt_t *jwt, const char *head,
-				  unsigned int head_len, const char *sig_b64)
+				  unsigned int head_len,
+				  unsigned char *sig, int slen)
 {
-	unsigned char *sig = NULL;
 	EVP_MD_CTX *mdctx = NULL;
 	EVP_PKEY_CTX *pkey_ctx = NULL;
 	ECDSA_SIG *ec_sig = NULL;
@@ -308,11 +284,10 @@ static int openssl_verify_sha_pem(jwt_t *jwt, const char *head,
 	const EVP_MD *alg;
 	int type;
 	BIO *bufkey = NULL;
-	int slen;
 
 	if (!ops_compat(jwt->key, JWT_CRYPTO_OPS_OPENSSL))
 		VERIFY_ERROR("Key is not compatible"); // LCOV_EXCL_LINE
-	
+
 	pkey = jwt->key->provider_data;
 
 	switch (jwt->alg) {
@@ -369,13 +344,11 @@ static int openssl_verify_sha_pem(jwt_t *jwt, const char *head,
 			VERIFY_ERROR("Unknown EdDSA curve"); // LCOV_EXCL_LINE
 		break;
 
+	// LCOV_EXCL_START
 	default:
-		VERIFY_ERROR("Unknown algorithm"); // LCOV_EXCL_LINE
+		VERIFY_ERROR("Unknown algorithm");
+	// LCOV_EXCL_STOP
 	}
-
-	sig = jwt_base64uri_decode(sig_b64, &slen);
-	if (sig == NULL)
-		VERIFY_ERROR("Error decoding signature");
 
 	if (type == EVP_PKEY_RSA_PSS) {
 		if (EVP_PKEY_id(pkey) != EVP_PKEY_RSA_PSS &&
@@ -406,8 +379,8 @@ static int openssl_verify_sha_pem(jwt_t *jwt, const char *head,
 
 		slen = i2d_ECDSA_SIG(ec_sig, NULL);
 
-		/* Reset this with the new information. */
-		sig = jwt_realloc(sig, slen);
+		/* Reset this with the new information */
+		sig = jwt_malloc(slen);
 		if (sig == NULL)
 			VERIFY_ERROR("Out of memory"); // LCOV_EXCL_LINE
 
@@ -443,7 +416,6 @@ static int openssl_verify_sha_pem(jwt_t *jwt, const char *head,
 jwt_verify_sha_pem_done:
 	BIO_free(bufkey);
 	EVP_MD_CTX_destroy(mdctx);
-	jwt_freemem(sig);
 	ECDSA_SIG_free(ec_sig);
 
 	return jwt->error;
@@ -455,7 +427,6 @@ struct jwt_crypto_ops jwt_openssl_ops = {
 	.provider		= JWT_CRYPTO_OPS_OPENSSL,
 
 	.sign_sha_hmac		= openssl_sign_sha_hmac,
-	.verify_sha_hmac	= openssl_verify_sha_hmac,
 	.sign_sha_pem		= openssl_sign_sha_pem,
 	.verify_sha_pem		= openssl_verify_sha_pem,
 

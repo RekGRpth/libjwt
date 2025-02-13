@@ -59,6 +59,24 @@ set_target_properties(jwt_static PROPERTIES
 	OUTPUT_NAME jwt
 	COMPILE_FLAGS -DJWT_STATIC_DEFINE)
 
+add_custom_command(
+	OUTPUT jwt-builder.i
+	COMMAND ${CMAKE_C_COMPILER} -E ${CMAKE_SOURCE_DIR}/libjwt/jwt-common.c -DJWT_BUILDER
+		-o jwt-builder.i
+	DEPENDS libjwt/jwt-common.c)
+
+add_custom_command(
+	OUTPUT jwt-checker.i
+	COMMAND ${CMAKE_C_COMPILER} -E ${CMAKE_SOURCE_DIR}/libjwt/jwt-common.c -DJWT_CHECKER
+		-o jwt-checker.i
+	DEPENDS libjwt/jwt-common.c)
+
+add_custom_target(gen_jwt_builder ALL DEPENDS jwt-builder.i)
+add_custom_target(gen_jwt_checker ALL DEPENDS jwt-checker.i)
+
+add_dependencies(jwt        gen_jwt_builder gen_jwt_checker)
+add_dependencies(jwt_static gen_jwt_builder gen_jwt_checker)
+
 set(JWT_SOURCES libjwt/base64.c
 	libjwt/jwt-memory.c
 	libjwt/jwt.c
@@ -66,20 +84,9 @@ set(JWT_SOURCES libjwt/base64.c
 	libjwt/jwt-setget.c
 	libjwt/jwt-crypto-ops.c
 	libjwt/jwt-encode.c
-	libjwt/jwt-verify.c)
-
-add_library(builder OBJECT)
-target_sources(builder PRIVATE libjwt/jwt-common.c)
-target_compile_definitions(builder PRIVATE JWT_BUILDER)
-set_property(TARGET builder PROPERTY POSITION_INDEPENDENT_CODE ON)
-
-add_library(checker OBJECT)
-target_sources(checker PRIVATE libjwt/jwt-common.c)
-target_compile_definitions(checker PRIVATE JWT_CHECKER)
-set_property(TARGET checker PROPERTY POSITION_INDEPENDENT_CODE ON)
-
-target_link_libraries(jwt PRIVATE builder checker)
-target_link_libraries(jwt_static PRIVATE builder checker)
+	libjwt/jwt-verify.c
+	libjwt/jwt-builder.c
+	libjwt/jwt-checker.c)
 
 # Allow building without deprecated functions (suggested)
 option(EXCLUDE_DEPRECATED
@@ -95,8 +102,6 @@ include_directories(${CMAKE_SOURCE_DIR}/include ${CMAKE_BINARY_DIR}
 
 target_link_libraries(jwt PUBLIC PkgConfig::JANSSON)
 target_link_libraries(jwt_static PUBLIC PkgConfig::JANSSON)
-target_link_libraries(builder PUBLIC PkgConfig::JANSSON)
-target_link_libraries(checker PUBLIC PkgConfig::JANSSON)
 
 # Process the detected packages
 set(HAVE_CRYPTO FALSE)
@@ -107,7 +112,6 @@ if (GNUTLS_FOUND)
 	target_link_libraries(jwt_static PUBLIC PkgConfig::GNUTLS)
 	list(APPEND JWT_SOURCES
 	     libjwt/gnutls/sign-verify.c)
-	# libjwt/gnutls/jwk-parse.c
 endif()
 
 if (MBEDTLS_FOUND)
@@ -117,7 +121,6 @@ if (MBEDTLS_FOUND)
 	target_link_libraries(jwt_static PUBLIC PkgConfig::MBEDTLS)
 	list(APPEND JWT_SOURCES
 	     libjwt/mbedtls/sign-verify.c)
-        # libjwt/mbedtls/jwk-parse.c
 endif()
 
 set(HAVE_CRYPTO TRUE)
@@ -128,16 +131,20 @@ list(APPEND JWT_SOURCES
      libjwt/openssl/jwk-parse.c
      libjwt/openssl/sign-verify.c)
 
+set(TOOLS)
+
 function(jwt_add_tool)
 	set(oneValueArgs NAME SRC DIR)
 	cmake_parse_arguments(Tool "" "${oneValueArgs}" "" ${ARGN})
 
+	list(APPEND TOOLS ${Tool_NAME})
 	add_executable(${Tool_NAME} ${Tool_SRC})
 	target_link_libraries(${Tool_NAME} PRIVATE jwt_static PkgConfig::OPENSSL)
 	# target_link_libraries(${Tool_NAME} PRIVATE jwt)
 	set_target_properties(${Tool_NAME} PROPERTIES
 		RUNTIME_OUTPUT_DIRECTORY
-		"${CMAKE_BINARY_DIR}/tools")
+		"${CMAKE_BINARY_DIR}/tools"
+		COMPILE_FLAGS -DJWT_STATIC_DEFINE)
 	install(TARGETS ${Tool_NAME}
 		RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endfunction()
@@ -212,7 +219,7 @@ configure_file(libjwt/libjwt.pc.in libjwt.pc @ONLY)
 install(FILES ${CMAKE_BINARY_DIR}/libjwt.pc
 	DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 
-find_package(Doxygen 1.12)
+find_package(Doxygen 1.9.8)
 
 if (DOXYGEN_FOUND)
 	set(DOXYGEN_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/doxygen-doc)
@@ -287,20 +294,20 @@ if (CHECK_FOUND)
 
 	add_custom_target(check
 		COMMAND ${CMAKE_CTEST_COMMAND}
-		DEPENDS ${UNIT_TESTS})
+		DEPENDS ${UNIT_TESTS} ${TOOLS})
 
 	if (ENABLE_COVERAGE)
 		set(CMAKE_BUILD_TYPE "Debug")
 		include(CodeCoverage)
 		append_coverage_compiler_flags()
 
-		set(COVERAGE_LCOV_INCLUDES "${CMAKE_SOURCE_DIR}/libjwt/*.c")
+		set(COVERAGE_LCOV_INCLUDES "${CMAKE_SOURCE_DIR}/libjwt/")
 		setup_target_for_coverage_lcov(
 			NAME check-code-coverage
 			OUTPUT "${PROJECT_NAME}-${PROJECT_VERSION}-coverage"
 			TITLE "${PROJECT_NAME}-${PROJECT_VERSION} Code Coverage"
 			EXECUTABLE ctest -j ${PROCESSOR_COUNT}
-			DEPENDENCIES ${UNIT_TESTS})
+			DEPENDENCIES ${UNIT_TESTS} ${TOOLS})
 	endif()
 elseif(ENABLE_COVERAGE)
 	message(SEND_ERROR "Coverage enabled, but did not find check library")

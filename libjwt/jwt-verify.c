@@ -84,15 +84,18 @@ int jwt_parse(jwt_t *jwt, const char *token, unsigned int *len)
 {
 	char_auto *head = NULL;
 	char *payload, *sig;
+	int head_len = strlen(token) + 1;
 
-	head = jwt_strdup(token);
-
+	head = jwt_malloc(head_len);
 	if (!head) {
 		// LCOV_EXCL_START
 		jwt_write_error(jwt, "Error allocating memory");
 		return 1;
 		// LCOV_EXCL_STOP
 	}
+
+	/* head_len includes nil */
+	memcpy(head, token, head_len);
 
 	/* Find the components. */
 	for (payload = head; payload[0] != '.'; payload++) {
@@ -171,7 +174,7 @@ static jwt_claims_t __verify_claims(jwt_t *jwt)
 				failed |= JWT_CLAIM_EXP;
 			}
 		} else if (err != JWT_VALUE_ERR_NOEXIST)
-			failed |= JWT_CLAIM_EXP; // LVOC_EXCL_LINE
+			failed |= JWT_CLAIM_EXP; // LCOV_EXCL_LINE
 	}
 
 	/* not valid before now */
@@ -184,7 +187,7 @@ static jwt_claims_t __verify_claims(jwt_t *jwt)
 				failed |= JWT_CLAIM_NBF;
 			}
 		} else if (err != JWT_VALUE_ERR_NOEXIST)
-			failed |= JWT_CLAIM_NBF; // LVOC_EXCL_LINE
+			failed |= JWT_CLAIM_NBF; // LCOV_EXCL_LINE
 	}
 
 	/* issuer doesn't match */
@@ -248,8 +251,11 @@ static int __verify_config_post(jwt_t *jwt, const jwt_config_t *config,
 			return 1;
 		}
 	} else if (config->alg != config->key->alg) {
+		/* It's not really possible to get here due to checks in setkey */
+		// LCOV_EXCL_START
 		jwt_write_error(jwt, "Config and key alg does not match");
 		return 1;
+		// LCOV_EXCL_STOP
 	}
 
 	return 0;

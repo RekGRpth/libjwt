@@ -581,60 +581,6 @@ jwt_sign_sha_hmac_done:
 	return ret;
 }
 
-#define VERIFY_HMAC_ERROR(__err) { ret = __err; goto jwt_verify_hmac_done; }
-
-static int wincrypt_verify_sha_hmac(jwt_t *jwt, const char *head, const char *sig)
-{
-	int ret;
-	char* pbHash = NULL;
-	unsigned int cbHash;
-	char* pbB64 = NULL;
-	DWORD cbB64;
-
-	/* Compute the HMAC on the "head" string. */
-	ret = jwt_sign_sha_hmac(jwt, &pbHash, &cbHash, head);
-	if (ret)
-		goto jwt_verify_hmac_done;
-
-	/* Encode as Base64. */
-	if (!CryptBinaryToStringA(
-		pbHash,
-		cbHash,
-		CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-		NULL,
-		&cbB64))
-		VERIFY_HMAC_ERROR(EINVAL);
-
-	/* Null terminator is already included in base64Size. */
-	pbB64 = (char*)jwt_malloc(cbB64);
-	if (!pbB64)
-		VERIFY_HMAC_ERROR(ENOMEM);
-
-	/* Get the actual value. */
-	if (!CryptBinaryToStringA(
-		pbHash,
-		cbHash,
-		CRYPT_STRING_BASE64 | CRYPT_STRING_NOCRLF,
-		pbB64,
-		&cbB64))
-		VERIFY_HMAC_ERROR(EINVAL);
-
-	/* URI encode. */
-	jwt_base64uri_encode(pbB64);
-
-	/* And now... */
-	ret = jwt_strcmp(pbB64, sig) ? EINVAL : 0;
-
-jwt_verify_hmac_done:
-	if (pbHash)
-		jwt_freemem(pbHash);
-
-	if (pbB64)
-		jwt_freemem(pbB64);
-
-	return ret;
-}
-
 #define SIGN_PEM_ERROR(__err) { ret = __err; goto jwt_sign_sha_pem_done; }
 
 static int wincrypt_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
@@ -837,7 +783,9 @@ jwt_sign_sha_pem_done:
 
 #define VERIFY_PEM_ERROR(__err) { ret = __err; goto jwt_verify_sha_pem_done; }
 
-static int wincrypt_verify_sha_pem(jwt_t *jwt, const char *head, const char *sig_b64)
+static int wincrypt_verify_sha_pem(jwt_t *jwt, const char *head,
+				   unsigned char *sig,
+				   int sig_len)
 {
 	int ret = EINVAL;
 	LPCWSTR alg;
@@ -891,9 +839,8 @@ static int wincrypt_verify_sha_pem(jwt_t *jwt, const char *head, const char *sig
 		VERIFY_PEM_ERROR(EINVAL);
 	}
 
-	/* Decode signature. */
-	if (!(pbSignature = jwt_b64_decode(sig_b64, &cbSignature)))
-		VERIFY_PEM_ERROR(EINVAL);
+	pbSignature = sig;
+	cbSignature = sig_len;
 
 	/* Open handle to public key. */
 	if (is_public_key_pem(jwt->key, jwt->key_len))
@@ -987,9 +934,6 @@ static int wincrypt_verify_sha_pem(jwt_t *jwt, const char *head, const char *sig
 	ret = 0;
 
 jwt_verify_sha_pem_done:
-	if (pbSignature)
-		jwt_freemem(pbSignature);
-
 	if (pbHashObject)
 		jwt_freemem(pbHashObject);
 
@@ -1025,7 +969,6 @@ struct jwt_crypto_ops jwt_gnutls_ops = {
 	.provider		= JWT_CRYPTO_OPS_WINCRYPT,
 
 	.sign_sha_hmac		= wincrypt_sign_sha_hmac,
-	.verify_sha_hmac	= wincrypt_verify_sha_hmac,
 	.sign_sha_pem		= wincrypt_sign_sha_pem,
 	.verify_sha_pem		= wincrypt_verify_sha_pem,
 

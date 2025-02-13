@@ -146,12 +146,13 @@ struct jwt_crypto_ops {
 	/* Signing/Verifying */
 	int (*sign_sha_hmac)(jwt_t *jwt, char **out, unsigned int *len,
 		const char *str, unsigned int str_len);
-	int (*verify_sha_hmac)(jwt_t *jwt, const char *head,
-		unsigned int head_len, const char *sig);
+	/* Verifying hmac is basically signing the current token and cmparing
+	 * the signatures. */
 	int (*sign_sha_pem)(jwt_t *jwt, char **out, unsigned int *len,
 		const char *str, unsigned int str_len);
 	int (*verify_sha_pem)(jwt_t *jwt, const char *head,
-		unsigned int head_len, const char *sig_b64);
+		unsigned int head_len, unsigned char *sig,
+		int sig_len);
 
 	/* Parsing a JWK to prepare it for use */
 	int jwk_implemented;
@@ -182,8 +183,6 @@ JWT_NO_EXPORT
 void *jwt_malloc(size_t size);
 JWT_NO_EXPORT
 void __jwt_freemem(void *ptr);
-JWT_NO_EXPORT
-void *jwt_realloc(void *ptr, size_t size);
 
 JWT_NO_EXPORT
 jwt_t *jwt_new(void);
@@ -221,12 +220,6 @@ void *jwt_base64uri_decode(const char *src, int *ret_len);
 /* A time-safe strcmp function */
 JWT_NO_EXPORT
 int jwt_strcmp(const char *str1, const char *str2);
-
-JWT_NO_EXPORT
-char *jwt_strdup(const char *str);
-
-JWT_NO_EXPORT
-void jwt_scrub_key(jwt_t *jwt);
 
 JWT_NO_EXPORT
 jwt_t *jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
