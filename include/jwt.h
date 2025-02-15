@@ -383,6 +383,10 @@ int jwt_builder_enable_iat(jwt_builder_t *builder, int enable);
  * The ctx value is also passed to the callback as part of the jwt_value_t
  * struct.
  *
+ * @note Calling this with a NULL cb param and a new ctx param after already
+ * setting the callback will allow updating the ctx passed to the callback.
+ * Calling with both values as NULL will disable the callback completely.
+ *
  * @param builder Pointer to a builder object
  * @param cb Pointer to a callback function
  * @param ctx Pointer to data to pass to the callback function
@@ -588,6 +592,10 @@ int jwt_checker_setkey(jwt_checker_t *checker, const jwt_alg_t alg, const
  *
  * The ctx value is also passed to the callback as part of the jwt_value_t
  * struct.
+ *
+ * @note Calling this with a NULL cb param and a new ctx param after already
+ * setting the callback will allow updating the ctx passed to the callback.
+ * Calling with both values as NULL will disable the callback completely.
  *
  * @param checker Pointer to a checker object
  * @param cb Pointer to a callback function
@@ -1166,7 +1174,7 @@ jwt_alg_t jwt_str_alg(const char *alg);
  */
 
 /**
- * @brief Create or add to a keyring of JSON Web Keys
+ * @brief Create or add to a keyring from a null terminated string
  *
  * This function, and the utility versions, allow you to create a keyring
  * used to verify and/or create JSON Web Tokens. It accepts either single
@@ -1193,7 +1201,7 @@ JWT_EXPORT
 jwk_set_t *jwks_load(jwk_set_t *jwk_set, const char *jwk_json_str);
 
 /**
- * @brief Create a new JWKS object from a string of known length
+ * @brief Create or add to a keyring from a string of known length
  *
  * Useful if the string is not null terminated. Otherwise, it works the same
  * as jwks_load().
@@ -1212,7 +1220,7 @@ jwk_set_t *jwks_load_strn(jwk_set_t *jwk_set, const char *jwk_json_str,
 			    const size_t len);
 
 /**
- * @brief Create a new JWKS object from a file
+ * @brief Create or add to a keyring from a file
  *
  * The JSON will be read from a file on the system. Must be readable by the
  * running process. The end result of this function is the same as jwks_load.
@@ -1228,7 +1236,7 @@ JWT_EXPORT
 jwk_set_t *jwks_load_fromfile(jwk_set_t *jwk_set, const char *file_name);
 
 /**
- * @brief Create a new JWKS object from a FILE pointer
+ * @brief Create or add to a keyring from a FILE pointer
  *
  * The JSON will be read from a FILE pointer. The end result of this function
  * is the same as jwks_load. The FILE pointer must be set to the starting
@@ -1244,6 +1252,28 @@ jwk_set_t *jwks_load_fromfile(jwk_set_t *jwk_set, const char *file_name);
  */
 JWT_EXPORT
 jwk_set_t *jwks_load_fromfp(jwk_set_t *jwk_set, FILE *input);
+
+/**
+ * @brief Create or add to a keyring from a URL
+ *
+ * The JSON will be retrieved from a URL. This can be any URL understood by
+ * by Libcurl.
+ *
+ * Example: https://example.com/.well-known/jwks.json
+ *
+ * @warning You should not have private keys available on public web sites.
+ *
+ * @param jwk_set Either NULL to create a new set, or an existing jwt_set
+ *   to add new keys to it.
+ * @param url A string URL to where the JSON representation of a single key
+ *   or array of "keys" can be retrieved from. Generally a json file.
+ * @param verify Set to 1 to verify the Host, 2 to verify Host and Peer.
+ *   2 is recommended unless you really need to disable with 0.
+ * @return A valid jwt_set_t on success. On failure, either NULL
+ *   or a jwt_set_t with error set. NULL generally means ENOMEM.
+ */
+JWT_EXPORT
+jwk_set_t *jwks_load_fromurl(jwk_set_t *jwk_set, const char *url, int verify);
 
 /**
  * @brief Wrapper around jwks_load() that explicitly creates a new keyring
@@ -1270,6 +1300,13 @@ jwk_set_t *jwks_create_fromfile(const char *file_name);
  */
 JWT_EXPORT
 jwk_set_t *jwks_create_fromfp(FILE *input);
+
+/**
+ * @brief Wrapper around jwks_load_fromurl() that explicitly creates a new
+ *  keyring
+ */
+JWT_EXPORT
+jwk_set_t *jwks_create_fromurl(const char *url, int verify);
 
 /**
  * @brief Check if there is an error with a jwk_set
@@ -1372,6 +1409,19 @@ static inline void jwks_freep(jwk_set_t **jwks) {
  */
 JWT_EXPORT
 const jwk_item_t *jwks_item_get(const jwk_set_t *jwk_set, size_t index);
+
+/**
+ * @brief Find a jwk_item_t with a specific kid (Key ID)
+ *
+ * LibJWT does not ensure that kid's are unique in a given keyring, so care
+ * must be taken. This will return the first match.
+ *
+ * @param jwk_set An existing jwk_set_t
+ * @param kid String representing a ``kid`` to find
+ * @return A jwk_item_t object or NULL if none found
+ */
+JWT_EXPORT
+jwk_item_t *jwks_find_bykid(jwk_set_t *jwk_set, const char *kid);
 
 /**
  * @brief Whether this key is private (or public)

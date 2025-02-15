@@ -495,11 +495,10 @@ START_TEST(gen_hs256_wcb)
 }
 END_TEST
 
-START_TEST(gen_hs256_stress)
+START_TEST(gen_ec_stress)
 {
 	jwt_builder_auto_t *builder = NULL;
-	const char exp[] = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.CM4dD95Nj"
-		"0vSfMGtDas432AUW1HAo7feCiAbt5Yjuds";
+	const char exp[] = "eyJhbGciOiJFUzM4NCIsInR5cCI6IkpXVCJ9.e30.";
 	int ret, i;
 
 	SET_OPS();
@@ -511,14 +510,15 @@ START_TEST(gen_hs256_stress)
 	ret = jwt_builder_enable_iat(builder, 0);
 	ck_assert_int_eq(ret, 1);
 
-	read_json("oct_key_256.json");
-	ret = jwt_builder_setkey(builder, JWT_ALG_HS256, g_item);
+	read_json("ec_key_secp384r1.json");
+	ret = jwt_builder_setkey(builder, JWT_ALG_ES384, g_item);
 	ck_assert_int_eq(ret, 0);
 
 	for (i = 0; i < 1000; i++) {
 		char_auto *out = jwt_builder_generate(builder);
 		ck_assert_ptr_nonnull(out);
-		ck_assert_str_eq(out, exp);
+		ck_assert_mem_eq(out, exp, strlen(exp));
+		ck_assert_int_eq(strlen(out), 169);
 	}
 
 	free_key();
@@ -817,6 +817,37 @@ START_TEST(header_str_setgetdel)
 }
 END_TEST
 
+START_TEST(sign_es256_bad_sig)
+{
+	jwt_builder_auto_t *builder = NULL;
+	const char *err;
+	char *out;
+	int ret;
+
+	SET_OPS();
+
+	builder = jwt_builder_new();
+	ck_assert_ptr_nonnull(builder);
+	ck_assert_int_eq(jwt_builder_error(builder), 0);
+
+	read_json("eddsa_key_ed25519_fake_es256.json");
+
+	ret = jwt_builder_setkey(builder, JWT_ALG_ES256, g_item);
+	fprintf(stderr, "%s\n", jwt_builder_error_msg(builder));
+	ck_assert_int_eq(ret, 0);
+
+	out = jwt_builder_generate(builder);
+	ck_assert_ptr_null(out);
+
+	err = jwt_builder_error_msg(builder);
+	ck_assert_ptr_nonnull(err);
+	/* Fails in different ways depending on the backend */
+	ck_assert_mem_eq(err, "JWT[", 4);
+
+	free_key();
+}
+END_TEST
+
 static Suite *libjwt_suite(const char *title)
 {
 	Suite *s;
@@ -835,18 +866,19 @@ static Suite *libjwt_suite(const char *title)
 	tcase_add_loop_test(tc_core, gen_wcb, 0, i);
 	tcase_add_loop_test(tc_core, gen_es384_pub, 0, i);
 	tcase_add_loop_test(tc_core, set_alg, 0, i);
+	tcase_add_loop_test(tc_core, gen_ec_stress, 0, i);
 	suite_add_tcase(s, tc_core);
 
 	tc_core = tcase_create("Error Handling");
 	tcase_add_loop_test(tc_core, null_handling, 0, i);
 	tcase_add_loop_test(tc_core, just_fail_wcb, 0, i);
+	tcase_add_loop_test(tc_core, sign_es256_bad_sig, 0, i);
 	suite_add_tcase(s, tc_core);
 
 	tc_core = tcase_create("HS256 Key Gen");
 	tcase_add_loop_test(tc_core, gen_hs256, 0, i);
 	tcase_add_loop_test(tc_core, gen_hs256_bits, 0, i);
 	tcase_add_loop_test(tc_core, gen_hs256_wcb, 0, i);
-	tcase_add_loop_test(tc_core, gen_hs256_stress, 0, i);
 	suite_add_tcase(s, tc_core);
 
 	tc_core = tcase_create("Claims SetGetDel");

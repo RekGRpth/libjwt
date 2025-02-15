@@ -53,6 +53,12 @@ START_TEST(test_jwks_keyring_load)
 	}
 	ck_assert_int_eq(fails, 0);
 
+	item = jwks_find_bykid(g_jwk_set, "SDSDS");
+	ck_assert_ptr_null(item);
+
+	item = jwks_find_bykid(g_jwk_set, "354912a0-b90a-435e-886a-1629f7b2665e");
+	ck_assert_ptr_nonnull(item);
+
 	ck_assert_int_eq(i, 27);
 	i = jwks_item_count(g_jwk_set);
 	ck_assert_int_eq(i, 27);
@@ -71,6 +77,45 @@ START_TEST(test_jwks_keyring_load)
 	free_key();
 }
 END_TEST
+
+#ifdef HAVE_LIBCURL
+START_TEST(load_fromurl)
+{
+	jwk_set_auto_t *jwk_set = NULL;
+	const char *test_url = getenv("LIBJWT_TEST_URL");
+
+	SET_OPS();
+
+	jwk_set = jwks_create_fromurl(NULL, 1);
+	ck_assert_ptr_null(jwk_set);
+
+	jwk_set = jwks_create_fromurl("file:///DOESNOTEXIST", 1);
+	ck_assert_ptr_nonnull(jwk_set);
+	ck_assert_str_eq(jwks_error_msg(jwk_set),
+			"Couldn't read a file:// file");
+	jwks_error_clear(jwk_set);
+
+	jwk_set = jwks_load_fromurl(jwk_set, "https://127.0.0.1:8989", 1);
+	ck_assert_ptr_nonnull(jwk_set);
+	ck_assert_str_eq(jwks_error_msg(jwk_set),
+			"Couldn't connect to server");
+	jwks_error_clear(jwk_set);
+
+	if (test_url == NULL || !strlen(test_url))
+		test_url = "file://" KEYDIR "/jwks_keyring.json";
+
+	jwk_set = jwks_load_fromurl(jwk_set, test_url, 2);
+	ck_assert_ptr_nonnull(jwk_set);
+
+	ck_assert_int_gt(jwks_item_count(jwk_set), 0);
+}
+#else
+START_TEST(load_fromurl)
+{
+	ck_assert_ptr_null(jwks_create_fromurl("file:///", 1));
+}
+END_TEST
+#endif
 
 START_TEST(test_jwks_keyring_all_bad)
 {
@@ -168,6 +213,8 @@ static Suite *libjwt_suite(const char *title)
 	/* Load a whole keyring */
 	tcase_add_loop_test(tc_core, test_jwks_keyring_load, 0, i);
 	tcase_add_loop_test(tc_core, test_jwks_keyring_all_bad, 0, i);
+
+	tcase_add_loop_test(tc_core, load_fromurl, 0, i);
 
 	/* Some coverage attempts */
 	tcase_add_loop_test(tc_core, test_jwks_key_op_all_types, 0, i);
