@@ -18,6 +18,8 @@ project(${LIBJWT_PROJECT}
 	HOMEPAGE_URL ${LIBJWT_HOMEPAGE_URL}
 	LANGUAGES C)
 
+set(MEMORYCHECK_COMMAND_OPTIONS "-q --tool=memcheck --leak-check=yes --num-callers=50 --trace-children=yes --leak-check=full --track-origins=yes --gen-suppressions=all")
+
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 add_compile_options(-Wall -Werror -Wextra -Wunused)
 
@@ -302,7 +304,8 @@ if (CHECK_FOUND)
 	endforeach()
 
 	if (BATS_CMD)
-		add_test(NAME jwt_cli COMMAND /bin/bash -c "export SRCDIR=\"${CMAKE_SOURCE_DIR}\"; \"${CMAKE_SOURCE_DIR}\"/tests/jwt-cli.bats")
+		add_test(NAME jwt_cli COMMAND /bin/bash -c
+			"export SRCDIR=\"${CMAKE_SOURCE_DIR}\"; \"${CMAKE_SOURCE_DIR}\"/tests/jwt-cli.bats")
 	endif()
 
 	add_custom_target(check
