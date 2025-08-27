@@ -79,13 +79,13 @@ endif()
 
 add_custom_command(
 	OUTPUT jwt-builder.i
-	COMMAND ${CMAKE_C_COMPILER} -E ${CMAKE_SOURCE_DIR}/libjwt/jwt-common.c -DJWT_BUILDER
+	COMMAND bash -c "${CMAKE_C_COMPILER} -E -DJWT_BUILDER ${CMAKE_SOURCE_DIR}/libjwt/jwt-common.c -o jwt-builder.i ${CMAKE_C_FLAGS}"
 		-o jwt-builder.i
 	DEPENDS libjwt/jwt-common.c)
 
 add_custom_command(
 	OUTPUT jwt-checker.i
-	COMMAND ${CMAKE_C_COMPILER} -E ${CMAKE_SOURCE_DIR}/libjwt/jwt-common.c -DJWT_CHECKER
+	COMMAND bash -c "${CMAKE_C_COMPILER} -E -DJWT_CHECKER ${CMAKE_SOURCE_DIR}/libjwt/jwt-common.c -o jwt-checker.i ${CMAKE_C_FLAGS}"
 		-o jwt-checker.i
 	DEPENDS libjwt/jwt-common.c)
 
@@ -185,6 +185,9 @@ jwt_add_tool(NAME jwk2key
 	     SRC tools/jwk2key.c)
 jwt_add_tool(NAME key2jwk
 	     SRC tools/key2jwk.c)
+install(DIRECTORY ${CMAKE_SOURCE_DIR}/tools/
+	DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
+	FILES_MATCHING PATTERN "*.1")
 
 # We need one of the things above to even work
 if (NOT HAVE_CRYPTO)
@@ -258,10 +261,6 @@ if (DOXYGEN_FOUND)
 		DESTINATION ${CMAKE_INSTALL_MANDIR}/man3
 		FILES_MATCHING PATTERN "man3/JW*.3"
 		PATTERN "man3/jw*.3")
-
-	install(DIRECTORY ${CMAKE_SOURCE_DIR}/tools/
-		DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
-		FILES_MATCHING PATTERN "*.1")
 
 	install(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/doxygen-doc/html/
 		DESTINATION  ${CMAKE_INSTALL_DOCDIR}/html/)
