@@ -66,6 +66,17 @@ struct jwt_common {
 	jwt_callback_t cb;
 	void *cb_ctx;
 
+	/* @rfc{7519,4.1.7} jti (JWT ID) callbacks. jti_gen is used by the
+	 * builder to produce an id; jti_check is used by the checker to
+	 * validate/consume one. jti_ctx is passed to whichever is set. */
+	jwt_jti_gen_cb_t jti_gen;
+	jwt_jti_check_cb_t jti_check;
+	void *jti_ctx;
+
+	/* NULL-terminated list of "crit" header parameter names that the
+	 * application understands. Only used by the checker. */
+	char **understood;
+
 	/* For builder, this is offset into the future.
 	 * For checker, this is the leeway.
 	 * Both are in seconds. */
@@ -81,6 +92,46 @@ struct jwt_builder {
 
 struct jwt_checker {
 	struct jwt_common c;
+	int error;
+	char error_msg[JWT_ERR_LEN];
+};
+
+/******************************/
+
+/* JWE is kept deliberately separate from JWS/JWT. A JWE is structurally and
+ * cryptographically different (5 parts, "alg"+"enc", a CEK), so it gets its
+ * own common struct rather than overloading struct jwt_common. */
+struct jwe_common {
+	jwe_key_alg_t key_alg;	/* @rfc{7516,4.1.1} "alg" key management	*/
+	jwe_enc_t enc;		/* @rfc{7516,4.1.2} "enc" content encryption	*/
+	const jwk_item_t *key;	/* Recipient key used for key management		*/
+	jwt_json_t *payload;	/* Claims/plaintext to encrypt (builder)	*/
+	jwt_json_t *headers;	/* Protected header				*/
+	jwt_callback_t cb;
+	void *cb_ctx;
+
+	/* The five JWE Compact Serialization components, populated during
+	 * encrypt (builder) or decrypt (checker). Owned by this struct. */
+	unsigned char *cek;	/* Content Encryption Key			*/
+	size_t cek_len;
+	unsigned char *enckey;	/* JWE Encrypted Key (wrapped CEK)		*/
+	size_t enckey_len;
+	unsigned char *iv;	/* JWE Initialization Vector			*/
+	size_t iv_len;
+	unsigned char *ct;	/* JWE Ciphertext				*/
+	size_t ct_len;
+	unsigned char *tag;	/* JWE Authentication Tag			*/
+	size_t tag_len;
+};
+
+struct jwe_builder {
+	struct jwe_common c;
+	int error;
+	char error_msg[JWT_ERR_LEN];
+};
+
+struct jwe_checker {
+	struct jwe_common c;
 	int error;
 	char error_msg[JWT_ERR_LEN];
 };
@@ -163,6 +214,65 @@ struct jwt_crypto_ops {
 	int (*process_rsa)(jwt_json_t *jwk, jwk_item_t *item);
 	int (*process_ec)(jwt_json_t *jwk, jwk_item_t *item);
 	void (*process_item_free)(jwk_item_t *item);
+
+	/* JWE (RFC 7516/7518). A backend may implement JWE crypto ops even if
+	 * it does not parse JWKs (JWK parsing always falls back to OpenSSL).
+	 * jwe_implemented is set once a backend provides the ops below; until
+	 * then, JWE operations on that backend fail cleanly. The ops are
+	 * declared here for all stages; each is filled in by its own stage and
+	 * left NULL otherwise. */
+	int jwe_implemented;
+
+	/* CSPRNG: fill out[0..len) with cryptographically random bytes.
+	 * Returns 0 on success. Backed by each backend's native RNG. */
+	int (*rng)(unsigned char *out, size_t len);
+
+	/* Content encryption (the "enc" algorithms). AAD is the ASCII bytes of
+	 * the encoded protected header. */
+	int (*encrypt_aes_gcm)(jwe_enc_t enc, const unsigned char *cek,
+		size_t cek_len, const unsigned char *iv, size_t iv_len,
+		const unsigned char *aad, size_t aad_len,
+		const unsigned char *pt, size_t pt_len,
+		unsigned char **ct, size_t *ct_len,
+		unsigned char **tag, size_t *tag_len);
+	int (*decrypt_aes_gcm)(jwe_enc_t enc, const unsigned char *cek,
+		size_t cek_len, const unsigned char *iv, size_t iv_len,
+		const unsigned char *aad, size_t aad_len,
+		const unsigned char *ct, size_t ct_len,
+		const unsigned char *tag, size_t tag_len,
+		unsigned char **pt, size_t *pt_len);
+	int (*encrypt_aes_cbc_hmac)(jwe_enc_t enc, const unsigned char *cek,
+		size_t cek_len, const unsigned char *iv, size_t iv_len,
+		const unsigned char *aad, size_t aad_len,
+		const unsigned char *pt, size_t pt_len,
+		unsigned char **ct, size_t *ct_len,
+		unsigned char **tag, size_t *tag_len);
+	int (*decrypt_aes_cbc_hmac)(jwe_enc_t enc, const unsigned char *cek,
+		size_t cek_len, const unsigned char *iv, size_t iv_len,
+		const unsigned char *aad, size_t aad_len,
+		const unsigned char *ct, size_t ct_len,
+		const unsigned char *tag, size_t tag_len,
+		unsigned char **pt, size_t *pt_len);
+
+	/* Key management: AES Key Wrap (RFC 3394). Key-mgmt shaped: a CEK goes
+	 * in, the wrapped key comes out (and the inverse). */
+	int (*wrap_aes_kw)(const jwk_item_t *key, const unsigned char *cek,
+		size_t cek_len, unsigned char **out, size_t *out_len);
+	int (*unwrap_aes_kw)(const jwk_item_t *key, const unsigned char *in,
+		size_t in_len, unsigned char **cek, size_t *cek_len);
+
+	/* Key management: RSAES-OAEP (and OAEP-256). */
+	int (*encrypt_cek_rsa)(jwe_key_alg_t alg, const jwk_item_t *key,
+		const unsigned char *cek, size_t cek_len,
+		unsigned char **out, size_t *out_len);
+	int (*decrypt_cek_rsa)(jwe_key_alg_t alg, const jwk_item_t *key,
+		const unsigned char *in, size_t in_len,
+		unsigned char **cek, size_t *cek_len);
+
+	/* ECDH-ES (reserved for the ECDH-ES stage). Ephemeral public key
+	 * generation/parsing for the "epk" header. */
+	int (*gen_epk)(const jwk_item_t *key, jwk_item_t **epk);
+	int (*parse_epk)(jwt_json_t *epk_json, jwk_item_t **epk);
 };
 
 #ifdef HAVE_OPENSSL
@@ -242,6 +352,10 @@ jwt_value_error_t __getter(jwt_json_t *which, jwt_value_t *value);
 JWT_NO_EXPORT
 int jwt_parse(jwt_t *jwt, const char *token, unsigned int *len);
 JWT_NO_EXPORT
+int jwt_check_crit(jwt_t *jwt, char * const *understood);
+JWT_NO_EXPORT
+int jwt_write_crit(jwt_t *jwt, char * const *crit);
+JWT_NO_EXPORT
 jwt_t *jwt_verify_complete(jwt_t *jwt, const jwt_config_t *config,
 			   const char *token, unsigned int payload_len);
 
@@ -250,6 +364,9 @@ char *jwt_encode_str(jwt_t *jwt);
 
 JWT_NO_EXPORT
 int jwt_head_setup(jwt_t *jwt);
+
+/* JWE alg/enc <-> string maps (jwe-setget.c). These are exported as part of
+ * the public API (jwe_alg_str etc.), declared in jwt.h. */
 
 #define __trace() fprintf(stderr, "%s:%d\n", __func__, __LINE__)
 
@@ -289,5 +406,117 @@ static inline jwk_key_type_t jwt_alg_required_kty(jwt_alg_t alg)
 	// LCOV_EXCL_STOP
 	}
 }
+
+/* @rfc{7518,5.1} The CEK length (in bytes) required by a content encryption
+ * ("enc") algorithm. The AES-CBC-HMAC algorithms use a double-length key
+ * (MAC_KEY || ENC_KEY), hence 32/48/64 bytes. Returns 0 for invalid enc. */
+static inline size_t jwe_enc_cek_len(jwe_enc_t enc)
+{
+	switch (enc) {
+	case JWE_ENC_A128GCM:
+		return 16;
+	case JWE_ENC_A192GCM:
+		return 24;
+	case JWE_ENC_A256GCM:
+		return 32;
+	case JWE_ENC_A128CBC_HS256:
+		return 32;
+	case JWE_ENC_A192CBC_HS384:
+		return 48;
+	case JWE_ENC_A256CBC_HS512:
+		return 64;
+	default:
+		return 0;
+	}
+}
+
+/* @rfc{7518,4.1} The IV length (in bytes) for a content encryption algorithm:
+ * 96-bit nonce for GCM, 128-bit IV for CBC. Returns 0 for invalid enc. */
+static inline size_t jwe_enc_iv_len(jwe_enc_t enc)
+{
+	switch (enc) {
+	case JWE_ENC_A128GCM:
+	case JWE_ENC_A192GCM:
+	case JWE_ENC_A256GCM:
+		return 12;
+	case JWE_ENC_A128CBC_HS256:
+	case JWE_ENC_A192CBC_HS384:
+	case JWE_ENC_A256CBC_HS512:
+		return 16;
+	default:
+		return 0;
+	}
+}
+
+/* The jwk_key_type_t that a JWE key management ("alg") algorithm requires of
+ * the recipient key. Mirrors jwt_alg_required_kty() for JWE and is the
+ * authoritative kty<->alg gate that prevents using, e.g., an RSA key for an
+ * AES Key Wrap operation. JWE_KEY_TYPE_NONE for invalid/unknown. */
+static inline jwk_key_type_t jwe_alg_required_kty(jwe_key_alg_t alg)
+{
+	switch (alg) {
+	case JWE_ALG_DIR:
+	case JWE_ALG_A128KW:
+	case JWE_ALG_A192KW:
+	case JWE_ALG_A256KW:
+		return JWK_KEY_TYPE_OCT;
+
+	case JWE_ALG_RSA_OAEP:
+	case JWE_ALG_RSA_OAEP_256:
+		return JWK_KEY_TYPE_RSA;
+
+	// LCOV_EXCL_START
+	default:
+		return JWK_KEY_TYPE_NONE;
+	// LCOV_EXCL_STOP
+	}
+}
+
+/* JWE shared helpers (jwe.c). Generate a fresh CEK for the given enc via the
+ * active backend's rng. Returns 0 on success and allocates *cek (the caller
+ * scrubs and frees it). */
+/* Generate a fresh CEK for the given enc via the active backend's rng.
+ * Returns 0 on success and allocates *cek (caller scrubs+frees). */
+JWT_NO_EXPORT
+int jwe_generate_cek(jwe_enc_t enc, unsigned char **cek, size_t *cek_len);
+
+/* AES Key Wrap (RFC 3394) of / unwrap to the CEK for an A*KW alg. The KEK is
+ * the recipient oct key; its length must match the alg. Return 0 on success.
+ * Unwrap failure (wrong KEK or tampered key) returns non-zero. */
+JWT_NO_EXPORT
+int jwe_wrap_cek(jwe_key_alg_t alg, const jwk_item_t *key,
+		 const unsigned char *cek, size_t cek_len,
+		 unsigned char **out, size_t *out_len);
+JWT_NO_EXPORT
+int jwe_unwrap_cek(jwe_key_alg_t alg, const jwk_item_t *key,
+		   const unsigned char *in, size_t in_len,
+		   unsigned char **cek, size_t *cek_len);
+
+/* Dispatch JWE content encryption/decryption to the active backend for the
+ * given enc. Return 0 on success. Decrypt verifies the AEAD tag. */
+JWT_NO_EXPORT
+int jwe_encrypt_content(jwe_enc_t enc, const unsigned char *cek,
+	size_t cek_len, const unsigned char *iv, size_t iv_len,
+	const unsigned char *aad, size_t aad_len,
+	const unsigned char *pt, size_t pt_len,
+	unsigned char **ct, size_t *ct_len,
+	unsigned char **tag, size_t *tag_len);
+JWT_NO_EXPORT
+int jwe_decrypt_content(jwe_enc_t enc, const unsigned char *cek,
+	size_t cek_len, const unsigned char *iv, size_t iv_len,
+	const unsigned char *aad, size_t aad_len,
+	const unsigned char *ct, size_t ct_len,
+	const unsigned char *tag, size_t tag_len,
+	unsigned char **pt, size_t *pt_len);
+
+/* Validate that a JWK may be used for a JWE operation with the given key
+ * management alg. Checks key type vs alg, the "use" attribute (must not be
+ * "sig"), and "key_ops" (if present, must permit the needed operation).
+ * @for_encrypt selects the producer (encrypt/wrap) vs consumer (decrypt/
+ * unwrap) direction. Returns NULL if the key is acceptable, or a static
+ * human-readable reason string if not. */
+JWT_NO_EXPORT
+const char *jwe_key_usage_check(const jwk_item_t *key, jwe_key_alg_t alg,
+				int for_encrypt);
 
 #endif /* JWT_PRIVATE_H */

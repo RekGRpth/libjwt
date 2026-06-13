@@ -6,6 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 LibJWT is a C library implementing RFC 7515-7519 for JSON Web Tokens (JWT), JSON Web Keys (JWK), and JWK Sets (JWKS). It supports multiple cryptographic backends (OpenSSL, GnuTLS, MBedTLS) and JSON backends (Jansson, json-c).
 
+## Issue Workflow
+
+Follow this pipeline for every piece of work:
+
+1. **Issue** — Work must map to a GitHub issue. If none exists, create one first describing the task.
+2. **Branch** — `git checkout -b <issue#>-<short-summary>` (e.g. `157-crit-header`). Never work on `master`.
+3. **Plan** — Plan the implementation, then post the plan as a comment on the issue.
+4. **Implement** — Do the work, including tests for all new code (see Testing) and coverage (no new uncovered lines). Verify under both JSON backends when JSON handling is touched.
+5. **PR** — Open a PR (`closes #<issue>`), then watch CI to completion (`gh pr checks <#> --watch` or the GitHub check-runs API) and fix any failures.
+
+Commit messages: `git commit -s` (Signed-off-by). Don't commit/push unless asked.
+
 ## Build Commands
 
 ```bash
@@ -16,6 +28,10 @@ make
 
 # Build with options
 cmake -DWITH_GNUTLS=ON -DWITH_MBEDTLS=ON -DWITH_LIBCURL=ON -DWITH_JSON_C=ON ..
+
+# Switching backends in an existing build/ resets unspecified flags (e.g.
+# ENABLE_COVERAGE -> OFF). Re-pass all flags and `make clean` after switching,
+# since stale .gcno/.gcda from the prior backend linger.
 
 # Run all tests
 make check
@@ -33,6 +49,12 @@ make check-code-coverage
 All new code MUST be covered by tests cases. Do not commit ANY code
 changes without running coverage first, and ensure there are no new
 missing lines covered.
+
+# NOTE: `make check-code-coverage` always exits non-zero — its final genhtml
+# step fails ("no valid records"). The lcov capture still succeeds; read
+# per-line coverage from build/check-code-coverage.capture (lcov DA: records).
+# In that file, jwt-common.c appears ~4x (builder/checker x lib/test-harness);
+# the real library coverage is the jwt.dir record, not the per-filename union.
 
 # Build documentation (requires Doxygen >= 1.9.8)
 # Docs are built automatically if Doxygen is found
@@ -60,6 +82,9 @@ The library has two key abstraction interfaces that allow swapping implementatio
 1. **Crypto backend abstraction** (`jwt-crypto-ops.c`, `jwt-private.h:jwt_crypto_ops`): Each crypto provider (OpenSSL, GnuTLS, MBedTLS) implements the `jwt_crypto_ops` struct with function pointers for sign/verify and JWK parsing. OpenSSL is always required (handles JWK parsing); GnuTLS and MBedTLS are optional additional providers. The active provider is selected at runtime via `jwt_set_crypto_ops()`.
 
 2. **JSON backend abstraction** (`jwt-json-ops.h`): Jansson and json-c each implement the same JSON operations interface. Selected at compile time via `WITH_JSON_C`.
+
+   - **json-c asserts (aborts)** where Jansson returns gracefully: e.g. `json_object_array_length()`/`_get_idx()` abort on a non-array (Jansson returns 0/NULL). Type-check in the json-c wrapper. Test any JSON handling under BOTH backends.
+   - `jwt_json_obj_set`/`jwt_json_arr_append` STEAL the value reference in both backends — never free what you set/append.
 
 ### Source Organization
 

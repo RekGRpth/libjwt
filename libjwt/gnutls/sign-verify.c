@@ -420,4 +420,13 @@ struct jwt_crypto_ops jwt_gnutls_ops = {
 	.process_rsa		= openssl_process_rsa,
 	.process_ec		= openssl_process_ec,
 	.process_item_free	= openssl_process_item_free,
+
+	.jwe_implemented	= 1,
+	.rng			= gnutls_rng,
+	.encrypt_aes_gcm	= gnutls_encrypt_aes_gcm,
+	.decrypt_aes_gcm	= gnutls_decrypt_aes_gcm,
+	.encrypt_aes_cbc_hmac	= gnutls_encrypt_aes_cbc_hmac,
+	.decrypt_aes_cbc_hmac	= gnutls_decrypt_aes_cbc_hmac,
+	.wrap_aes_kw		= gnutls_wrap_aes_kw,
+	.unwrap_aes_kw		= gnutls_unwrap_aes_kw,
 };
