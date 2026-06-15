@@ -175,6 +175,29 @@ int jwt_json_obj_merge_new(jwt_json_t *object, jwt_json_t *other)
 	return json_object_update_missing(to_json(object), to_json(other));
 }
 
+int jwt_json_obj_foreach(const jwt_json_t *object, jwt_json_obj_iter_cb cb,
+			 void *ctx)
+{
+	const char *key;
+	json_t *val;
+	int ret;
+
+	/* Defensive: callers type-check before iterating; a non-object is a
+	 * no-op (matching the abort-safety guards on the array accessors). */
+	if (!object || !cb || !json_is_object(to_json(object)))
+		return 0; // LCOV_EXCL_LINE
+
+	/* The callback gets a borrowed reference; we never mutate during
+	 * iteration. */
+	json_object_foreach(to_json(object), key, val) {
+		ret = cb(key, from_json(val), ctx);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 /* ================================================================
  * Array operations
  * ================================================================ */
@@ -197,6 +220,11 @@ int jwt_json_arr_append(jwt_json_t *array, jwt_json_t *value)
 /* ================================================================
  * Type checking
  * ================================================================ */
+
+int jwt_json_is_object(const jwt_json_t *json)
+{
+	return json_is_object(to_json(json));
+}
 
 int jwt_json_is_array(const jwt_json_t *json)
 {

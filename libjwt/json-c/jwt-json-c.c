@@ -203,6 +203,27 @@ int jwt_json_obj_merge_new(jwt_json_t *object, jwt_json_t *other)
 	return 0;
 }
 
+int jwt_json_obj_foreach(const jwt_json_t *object, jwt_json_obj_iter_cb cb,
+			 void *ctx)
+{
+	int ret;
+
+	/* json_object_object_foreach aborts on a non-object, so type-check
+	 * first (matching the abort-safety guards elsewhere in this backend).
+	 * Callers type-check before iterating, so the guard is defensive. */
+	if (!object || !cb ||
+	    !json_object_is_type(to_jc(object), json_type_object))
+		return 0; // LCOV_EXCL_LINE
+
+	json_object_object_foreach(to_jc(object), key, val) {
+		ret = cb(key, from_jc(val), ctx);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 /* ================================================================
  * Array operations
  * ================================================================ */
@@ -237,6 +258,11 @@ int jwt_json_arr_append(jwt_json_t *array, jwt_json_t *value)
 /* ================================================================
  * Type checking
  * ================================================================ */
+
+int jwt_json_is_object(const jwt_json_t *json)
+{
+	return json && json_object_is_type(to_jc(json), json_type_object);
+}
 
 int jwt_json_is_array(const jwt_json_t *json)
 {

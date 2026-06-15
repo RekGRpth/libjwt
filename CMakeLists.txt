@@ -168,7 +168,9 @@ if (GNUTLS_FOUND)
 	target_link_libraries(jwt PUBLIC PkgConfig::GNUTLS)
 	target_link_libraries(jwt_static PUBLIC PkgConfig::GNUTLS)
 	list(APPEND JWT_SOURCES
-	     libjwt/gnutls/sign-verify.c)
+	     libjwt/gnutls/jwk-parse.c
+	     libjwt/gnutls/sign-verify.c
+	     libjwt/gnutls/jwe.c)
 endif()
 
 if (MBEDTLS_FOUND)
@@ -177,7 +179,9 @@ if (MBEDTLS_FOUND)
 	target_link_libraries(jwt PUBLIC PkgConfig::MBEDTLS)
 	target_link_libraries(jwt_static PUBLIC PkgConfig::MBEDTLS)
 	list(APPEND JWT_SOURCES
-	     libjwt/mbedtls/sign-verify.c)
+	     libjwt/mbedtls/jwk-parse.c
+	     libjwt/mbedtls/sign-verify.c
+	     libjwt/mbedtls/jwe.c)
 endif()
 
 set(HAVE_CRYPTO TRUE)
@@ -186,7 +190,8 @@ target_link_libraries(jwt PUBLIC PkgConfig::OPENSSL)
 target_link_libraries(jwt_static PUBLIC PkgConfig::OPENSSL)
 list(APPEND JWT_SOURCES
      libjwt/openssl/jwk-parse.c
-     libjwt/openssl/sign-verify.c)
+     libjwt/openssl/sign-verify.c
+     libjwt/openssl/jwe.c)
 
 if (LIBCURL_FOUND)
 	add_definitions(-DHAVE_LIBCURL)
@@ -197,17 +202,31 @@ endif()
 set(TOOLS)
 
 function(jwt_add_tool)
+	set(options STATIC)
 	set(oneValueArgs NAME SRC DIR)
-	cmake_parse_arguments(Tool "" "${oneValueArgs}" "" ${ARGN})
+	cmake_parse_arguments(Tool "${options}" "${oneValueArgs}" "" ${ARGN})
 
 	list(APPEND TOOLS ${Tool_NAME})
 	add_executable(${Tool_NAME} ${Tool_SRC})
-	target_link_libraries(${Tool_NAME} PRIVATE jwt_static PkgConfig::OPENSSL)
-	# target_link_libraries(${Tool_NAME} PRIVATE jwt)
-	set_target_properties(${Tool_NAME} PROPERTIES
-		RUNTIME_OUTPUT_DIRECTORY
-		"${CMAKE_BINARY_DIR}/tools"
-		COMPILE_FLAGS -DJWT_STATIC_DEFINE)
+	if (Tool_STATIC)
+		# Some tools reach into LibJWT internals (e.g. key2jwk uses
+		# jwt-private.h) that are not exported from the shared library,
+		# so they must link the static archive. Tracked in #275: once
+		# that logic moves into libjwt as exported public API, drop the
+		# STATIC flag and let these link the shared library too.
+		target_link_libraries(${Tool_NAME}
+			PRIVATE jwt_static PkgConfig::OPENSSL)
+		set_target_properties(${Tool_NAME} PROPERTIES
+			RUNTIME_OUTPUT_DIRECTORY
+			"${CMAKE_BINARY_DIR}/tools"
+			COMPILE_FLAGS -DJWT_STATIC_DEFINE)
+	else()
+		target_link_libraries(${Tool_NAME}
+			PRIVATE jwt PkgConfig::OPENSSL)
+		set_target_properties(${Tool_NAME} PROPERTIES
+			RUNTIME_OUTPUT_DIRECTORY
+			"${CMAKE_BINARY_DIR}/tools")
+	endif()
 	install(TARGETS ${Tool_NAME}
 		RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endfunction()
@@ -218,8 +237,12 @@ jwt_add_tool(NAME jwt-generate
 	     SRC tools/jwt-generate.c)
 jwt_add_tool(NAME jwk2key
 	     SRC tools/jwk2key.c)
-jwt_add_tool(NAME key2jwk
+jwt_add_tool(NAME key2jwk STATIC
 	     SRC tools/key2jwk.c)
+jwt_add_tool(NAME jwe-encrypt
+	     SRC tools/jwe-encrypt.c)
+jwt_add_tool(NAME jwe-decrypt
+	     SRC tools/jwe-decrypt.c)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/tools/
 	DESTINATION ${CMAKE_INSTALL_MANDIR}/man1
 	FILES_MATCHING PATTERN "*.1")
@@ -349,7 +372,9 @@ if (CHECK_FOUND)
 	list (APPEND UNIT_TESTS jwt_builder jwt_checker jwt_flipflop)
 
 	# JWE
-	list (APPEND UNIT_TESTS jwe_foundation jwe_keys)
+	list (APPEND UNIT_TESTS jwe_foundation jwe_keys jwe_gcm jwe_cbc
+		jwe_aeskw jwe_rsa jwe_ecdh jwe_json jwe_aad jwe_multi
+		jwe_json_neg)
 
 	# Claims
 	list (APPEND UNIT_TESTS jwt_claims)

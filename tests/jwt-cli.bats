@@ -78,3 +78,131 @@ EOF
 	./tools/jwk2key -d . ${SRCDIR}/tests/keys/oct_key_384.json
 	cmp oct_384.bin ${SRCDIR}/tests/cli/oct_384.bin
 }
+
+# JWE tools
+
+OCT256="../tests/keys/oct_dir_256.json"
+OCT256B="../tests/keys/oct_key_256_enc.json"
+RSAENC="../tests/keys/rsa_key_2048_enc.json"
+
+@test "JWE dir + A256GCM round-trip" {
+	tok="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -j '{"a":1}')"
+	result="$(echo "${tok}" | ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM)"
+	[ "${result}" = '{"a":1}' ]
+}
+
+@test "JWE A256KW + A256CBC-HS512 round-trip" {
+	tok="$(./tools/jwe-encrypt -k ${OCT256} -a A256KW -e A256CBC-HS512 -j '{"b":2}')"
+	result="$(echo "${tok}" | ./tools/jwe-decrypt -k ${OCT256} -a A256KW -e A256CBC-HS512)"
+	[ "${result}" = '{"b":2}' ]
+}
+
+@test "JWE RSA-OAEP-256 + A256GCM round-trip" {
+	tok="$(./tools/jwe-encrypt -k ${RSAENC} -a RSA-OAEP-256 -e A256GCM -j '{"c":3}')"
+	result="$(echo "${tok}" | ./tools/jwe-decrypt -k ${RSAENC} -a RSA-OAEP-256 -e A256GCM)"
+	[ "${result}" = '{"c":3}' ]
+}
+
+@test "JWE decrypt with wrong key fails" {
+	tok="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -j '{}')"
+	run bash -c "echo '${tok}' | ./tools/jwe-decrypt -k ${OCT256B} -a dir -e A256GCM"
+	[ "${status}" -ne 0 ]
+}
+
+@test "JWE encrypt rejects unknown algorithm" {
+	run ./tools/jwe-encrypt -k ${OCT256} -a BOGUS -e A256GCM -j '{}'
+	[ "${status}" -ne 0 ]
+}
+
+ECENC="../tests/keys/ec_key_prime256v1_enc.json"
+
+@test "JWE Flattened JSON round-trip (auto-detect on decrypt)" {
+	tok="$(./tools/jwe-encrypt -k ${OCT256B} -a A256KW -e A256GCM \
+		-f json-flat -j '{"d":4}')"
+	# The JSON serialization is a JSON object.
+	[ "${tok:0:1}" = '{' ]
+	result="$(echo "${tok}" | ./tools/jwe-decrypt -k ${OCT256B} -a A256KW \
+		-e A256GCM)"
+	[ "${result}" = '{"d":4}' ]
+}
+
+@test "JWE General JSON round-trip" {
+	tok="$(./tools/jwe-encrypt -k ${OCT256B} -a A256KW -e A256GCM \
+		-f json-general -j '{"e":5}')"
+	echo "${tok}" | grep -q '"recipients"'
+	result="$(echo "${tok}" | ./tools/jwe-decrypt -k ${OCT256B} -a A256KW \
+		-e A256GCM)"
+	[ "${result}" = '{"e":5}' ]
+}
+
+@test "JWE --aad round-trips and is authenticated" {
+	aadf="${BATS_TMPDIR:-/tmp}/jwe_aad_$$"
+	printf 'extra authenticated data' > "${aadf}"
+	tok="$(./tools/jwe-encrypt -k ${OCT256B} -a A256KW -e A256GCM \
+		-f json-flat -A "${aadf}" -j '{"f":6}')"
+	rm -f "${aadf}"
+	echo "${tok}" | grep -q '"aad"'
+	result="$(echo "${tok}" | ./tools/jwe-decrypt -k ${OCT256B} -a A256KW \
+		-e A256GCM)"
+	[ "${result}" = '{"f":6}' ]
+}
+
+@test "JWE multi-recipient: each recipient's key decrypts" {
+	tok="$(./tools/jwe-encrypt -k ${OCT256B} -a A256KW -e A256GCM \
+		-r RSA-OAEP-256:${RSAENC} -r ECDH-ES+A128KW:${ECENC} \
+		-j '{"g":7}')"
+	echo "${tok}" | grep -q '"recipients"'
+
+	r1="$(echo "${tok}" | ./tools/jwe-decrypt -k ${OCT256B} -a A256KW \
+		-e A256GCM)"
+	[ "${r1}" = '{"g":7}' ]
+	r2="$(echo "${tok}" | ./tools/jwe-decrypt -k ${RSAENC} -a RSA-OAEP-256 \
+		-e A256GCM)"
+	[ "${r2}" = '{"g":7}' ]
+	r3="$(echo "${tok}" | ./tools/jwe-decrypt -k ${ECENC} \
+		-a ECDH-ES+A128KW -e A256GCM)"
+	[ "${r3}" = '{"g":7}' ]
+}
+
+@test "JWE encrypt rejects unknown format" {
+	run ./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -f bogus -j '{}'
+	[ "${status}" -ne 0 ]
+}
+
+@test "JWE encrypt rejects malformed --recipient" {
+	run ./tools/jwe-encrypt -k ${OCT256B} -a A256KW -e A256GCM \
+		-r noColonHere -j '{}'
+	[ "${status}" -ne 0 ]
+}
+
+# Regression for #264: an oct JWK with a very large `k` makes the key
+# bit-length (len_k * 8) an 8+ digit number. jwk2key formatted it into a
+# fixed 8-byte buffer (char bits[8]) with an unbounded sprintf, overflowing
+# the stack. The decoded `k` here is ~1.3 MB, so bits = 10500000 (8 digits)
+# and overflowed bits[8].
+#
+# A crash is not a reliable signal (the overflow lands in adjacent stack
+# memory and often doesn't fault), so instead assert the *observable*
+# outcome: with the fix, bits is safely truncated and a correctly named
+# oct_1050000.bin is written. Without the fix, the overflow corrupts the
+# output path and that file is never created.
+@test "jwk2key handles oversized oct key without buffer overflow (#264)" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key264_$$"
+	mkdir -p "${dir}"
+	jwk="${dir}/big.json"
+	# 1.75 MB of base64url 'A's decodes to ~1.3 MB -> bits = 10500000,
+	# truncated to 1050000 (7 digits) once snprintf bounds the write.
+	k="$(head -c 1750000 /dev/zero | tr '\0' 'A')"
+	printf '{"kty":"oct","k":"%s"}' "${k}" > "${jwk}"
+
+	run ./tools/jwk2key -d "${dir}" "${jwk}"
+
+	status_was="${status}"
+	have_out=0
+	[ -f "${dir}/oct_1050000.bin" ] && have_out=1
+	rm -rf "${dir}"
+
+	# Must not crash (128+signal) and must produce the correctly named file.
+	[ "${status_was}" -lt 128 ]
+	[ "${have_out}" -eq 1 ]
+}
