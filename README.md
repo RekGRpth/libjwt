@@ -49,10 +49,51 @@ JWS Algorithm ``alg``         | OpenSSL            | GnuTLS             | MbedTL
 ``RS256`` ``RS384`` ``RS512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``EdDSA`` using ``ED25519``   | :white_check_mark: | :white_check_mark: | :x:
 ``EdDSA`` using ``ED448``     | :white_check_mark: | :white_check_mark: ``>= 3.8.8`` | :x:
-``PS256`` ``PS384`` ``PS512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:``*``
+``PS256`` ``PS384`` ``PS512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``ES256K``                    | :white_check_mark: | :x:                | :white_check_mark:
 
-``*`` RSASSA-PSS support in MbedTLS depends on Mbed-TLS/TF-PSA-Crypto#154
+#### JWE
+
+LibJWT supports JWE (RFC 7516) in both the Compact Serialization and the JSON
+Serialization (the Flattened form and the General form with one or more
+recipients). A JWE uses two algorithms: a key management algorithm (``alg``)
+and a content encryption algorithm (``enc``).
+
+| JWE serialization | Recipients | Supported |
+| :---------------- | :--------- | :-------- |
+| Compact (RFC 7516 §7.1)        | one  | :white_check_mark: |
+| JSON Flattened (RFC 7516 §7.2.2) | one  | :white_check_mark: |
+| JSON General (RFC 7516 §7.2.1)   | one or more | :white_check_mark: |
+
+With the JSON serializations the plaintext is encrypted once with a single CEK;
+each recipient wraps that CEK independently, so any recipient's key can decrypt
+the token. They also carry an optional shared unprotected header, per-recipient
+headers, and an application AAD member.
+
+Legend: :white_check_mark: native implementation &nbsp;·&nbsp;
+:large_blue_circle: supported, using OpenSSL as a fallback &nbsp;·&nbsp; :x: not supported
+
+JWE key management ``alg``    | OpenSSL            | GnuTLS             | MbedTLS
+:---------------------------- | :----------------- | :----------------- | :-----------------
+``dir`` (Direct Encryption)   | :white_check_mark: | :white_check_mark: | :white_check_mark:
+``A128KW`` ``A192KW`` ``A256KW`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
+``RSA-OAEP`` (SHA-1)          | :white_check_mark: | :large_blue_circle: | :white_check_mark:
+``RSA-OAEP-256``              | :white_check_mark: | :white_check_mark: | :white_check_mark:
+``ECDH-ES`` (+ ``+A128KW``/``+A192KW``/``+A256KW``) | :white_check_mark: | :white_check_mark: | :white_check_mark:
+
+JWE content encryption ``enc`` | OpenSSL            | GnuTLS             | MbedTLS
+:----------------------------- | :----------------- | :----------------- | :-----------------
+``A128GCM`` ``A192GCM`` ``A256GCM`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
+``A128CBC-HS256`` ``A192CBC-HS384`` ``A256CBC-HS512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
+
+> [!NOTE]
+> ``ECDH-ES`` supports both Direct Key Agreement and the ``+A*KW`` key
+> wrapping modes, on the EC curves P-256/384/521 and the OKP curves
+> X25519/X448, with optional ``apu``/``apv`` PartyInfo. ``RSA1_5`` and
+> ``zip`` (compression) are intentionally not supported. Each backend
+> implements JWE natively, with one exception: GnuTLS/Nettle cannot perform
+> RSA-OAEP with SHA-1, so plain ``RSA-OAEP`` falls back to OpenSSL under the
+> GnuTLS backend (``RSA-OAEP-256`` is native).
 
 ### Optional
 

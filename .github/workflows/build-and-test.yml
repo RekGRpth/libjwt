@@ -89,3 +89,47 @@ jobs:
           --
           all
           check
+
+  # MbedTLS requires >= 3.6.0, which Ubuntu does not package (it ships 2.28).
+  # Debian forky provides mbedtls 3.6.x, so run the MbedTLS matrix in a forky
+  # container. This validates the native MbedTLS JWS/JWK/JWE backend and the
+  # cross-backend interop tests (which loop over every compiled provider).
+  build-linux-mbedtls:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:forky
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install dependencies
+      run: |
+        apt-get update
+        apt-get install -y --no-install-recommends \
+          gcc cmake pkg-config make git curl \
+          libssl-dev gnutls-dev libmbedtls-dev libjansson-dev \
+          libcurl4-openssl-dev check bats jq ca-certificates lcov
+
+    # The repo is checked out as a different owner than the container user;
+    # mark it safe so the Codecov action's git calls work.
+    - name: Mark workspace safe for git
+      run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+    # forky ships GnuTLS >= 3.8.4 and MbedTLS 3.x, so this job exercises the
+    # native MbedTLS backend AND the native GnuTLS JWE path (RSA-OAEP-256,
+    # ECDH-ES, JWK parsing) that Ubuntu's older GnuTLS cannot. Coverage is
+    # collected here too and merged by Codecov with the OpenSSL/GnuTLS-fallback
+    # report from build-linux, so the version-gated native lines are counted.
+    - name: Build, Test, and Coverage (OpenSSL + GnuTLS + MbedTLS)
+      run: |
+        cmake -B build -DWITH_MBEDTLS=YES -DWITH_LIBCURL=YES \
+              -DENABLE_COVERAGE=YES
+        # The genhtml step of check-code-coverage exits non-zero, but the lcov
+        # capture (check-code-coverage.info) is produced and is what we upload.
+        cmake --build build -- all check-code-coverage || true
+        test -f build/check-code-coverage.info
+
+    - uses: codecov/codecov-action@v5.1.2
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
+        files: ${{github.workspace}}/build/check-code-coverage.info
+        disable_search: true
+        verbose: true

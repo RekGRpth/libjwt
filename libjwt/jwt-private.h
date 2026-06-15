@@ -98,30 +98,72 @@ struct jwt_checker {
 
 /******************************/
 
+/* @rfc{7516,7.2.1} A single JWE recipient: its own key management alg, key,
+ * optional ECDH-ES partyinfo, optional per-recipient (unprotected) header, and
+ * the JWE Encrypted Key produced for it. Linked via ll.h (like jwk_set), so a
+ * Compact / Flattened JWE is just a one-element list and the General JSON
+ * Serialization is a list of N. Owned by the enclosing struct jwe_common. */
+struct jwe_recipient {
+	ll_t node;
+	jwe_key_alg_t key_alg;	/* @rfc{7516,4.1.1} "alg" key management	*/
+	const jwk_item_t *key;	/* Recipient key used for key management		*/
+
+	/* @rfc{7518,4.6.2} Optional ECDH-ES PartyUInfo/PartyVInfo, stored as
+	 * the base64url strings emitted in the "apu"/"apv" headers. */
+	char *apu;
+	char *apv;
+
+	/* @rfc{7516,7.2.1} Optional per-recipient unprotected header. For the
+	 * JSON serializations this also carries ECDH-ES "epk"/"apu"/"apv". */
+	jwt_json_t *header;
+
+	unsigned char *enckey;	/* JWE Encrypted Key (wrapped CEK)		*/
+	size_t enckey_len;
+};
+
 /* JWE is kept deliberately separate from JWS/JWT. A JWE is structurally and
  * cryptographically different (5 parts, "alg"+"enc", a CEK), so it gets its
  * own common struct rather than overloading struct jwt_common. */
 struct jwe_common {
-	jwe_key_alg_t key_alg;	/* @rfc{7516,4.1.1} "alg" key management	*/
 	jwe_enc_t enc;		/* @rfc{7516,4.1.2} "enc" content encryption	*/
-	const jwk_item_t *key;	/* Recipient key used for key management		*/
 	jwt_json_t *payload;	/* Claims/plaintext to encrypt (builder)	*/
-	jwt_json_t *headers;	/* Protected header				*/
+	jwt_json_t *headers;	/* @rfc{7516,7.2.1} Protected header		*/
+	jwt_json_t *unprotected;/* @rfc{7516,7.2.1} Shared unprotected header	*/
 	jwt_callback_t cb;
 	void *cb_ctx;
 
-	/* The five JWE Compact Serialization components, populated during
-	 * encrypt (builder) or decrypt (checker). Owned by this struct. */
+	/* @rfc{7516,7.2.1} Recipients. setkey()/set_partyinfo() manage the
+	 * first element; add_recipient() appends further ones. A Compact or
+	 * Flattened JWE has exactly one. */
+	ll_t recipients;
+	int n_recipients;
+
+	/* @rfc{7516,4.1.4} Serialization to emit (builder). */
+	jwe_serialization_t format;
+
+	/* @rfc{7516,5.1} step 14 The application-supplied JWE AAD (the "aad"
+	 * member of the JSON serializations). @aad_b64 is its base64url form,
+	 * which is also what is concatenated into the AEAD AAD. */
+	unsigned char *aad;	/* Raw AAD provided by the builder caller	*/
+	size_t aad_len;
+	char *aad_b64;
+
+	/* The shared JWE components (one CEK / IV / ciphertext / tag per token,
+	 * regardless of recipient count). Populated during encrypt (builder) or
+	 * decrypt (checker). Owned by this struct. */
 	unsigned char *cek;	/* Content Encryption Key			*/
 	size_t cek_len;
-	unsigned char *enckey;	/* JWE Encrypted Key (wrapped CEK)		*/
-	size_t enckey_len;
 	unsigned char *iv;	/* JWE Initialization Vector			*/
 	size_t iv_len;
 	unsigned char *ct;	/* JWE Ciphertext				*/
 	size_t ct_len;
 	unsigned char *tag;	/* JWE Authentication Tag			*/
 	size_t tag_len;
+
+	/* @rfc{7516,7.2.1} The application AAD recovered by the checker from a
+	 * JSON serialization's "aad" member, handed back via get_aad(). */
+	unsigned char *recovered_aad;
+	size_t recovered_aad_len;
 };
 
 struct jwe_builder {
@@ -261,6 +303,14 @@ struct jwt_crypto_ops {
 	int (*unwrap_aes_kw)(const jwk_item_t *key, const unsigned char *in,
 		size_t in_len, unsigned char **cek, size_t *cek_len);
 
+	/* AES Key Wrap with a raw KEK (the agreed key in ECDH-ES+A*KW). */
+	int (*wrap_aes_kw_raw)(const unsigned char *kek, size_t kek_len,
+		const unsigned char *cek, size_t cek_len,
+		unsigned char **out, size_t *out_len);
+	int (*unwrap_aes_kw_raw)(const unsigned char *kek, size_t kek_len,
+		const unsigned char *in, size_t in_len,
+		unsigned char **cek, size_t *cek_len);
+
 	/* Key management: RSAES-OAEP (and OAEP-256). */
 	int (*encrypt_cek_rsa)(jwe_key_alg_t alg, const jwk_item_t *key,
 		const unsigned char *cek, size_t cek_len,
@@ -269,10 +319,13 @@ struct jwt_crypto_ops {
 		const unsigned char *in, size_t in_len,
 		unsigned char **cek, size_t *cek_len);
 
-	/* ECDH-ES (reserved for the ECDH-ES stage). Ephemeral public key
-	 * generation/parsing for the "epk" header. */
-	int (*gen_epk)(const jwk_item_t *key, jwk_item_t **epk);
-	int (*parse_epk)(jwt_json_t *epk_json, jwk_item_t **epk);
+	/* ECDH-ES (RFC 7518 4.6). On encrypt, generates an ephemeral keypair,
+	 * writes the "epk" into the header, and derives the agreed key via the
+	 * Concat KDF. On decrypt, reads "epk" from the header and derives the
+	 * same key. The derived key is the CEK (ECDH-ES) or a KEK (ECDH-ES+KW). */
+	int (*ecdh_derive)(jwe_key_alg_t alg, jwe_enc_t enc,
+		const jwk_item_t *key, int for_encrypt, jwt_json_t *hdr,
+		unsigned char **dk, size_t *dk_len);
 };
 
 #ifdef HAVE_OPENSSL
@@ -465,6 +518,14 @@ static inline jwk_key_type_t jwe_alg_required_kty(jwe_key_alg_t alg)
 	case JWE_ALG_RSA_OAEP_256:
 		return JWK_KEY_TYPE_RSA;
 
+	case JWE_ALG_ECDH_ES:
+	case JWE_ALG_ECDH_ES_A128KW:
+	case JWE_ALG_ECDH_ES_A192KW:
+	case JWE_ALG_ECDH_ES_A256KW:
+		/* ECDH-ES uses an EC (or, in a later release, OKP X25519/X448)
+		 * key. EC is the required type for the supported curves. */
+		return JWK_KEY_TYPE_EC;
+
 	// LCOV_EXCL_START
 	default:
 		return JWK_KEY_TYPE_NONE;
@@ -492,6 +553,40 @@ int jwe_unwrap_cek(jwe_key_alg_t alg, const jwk_item_t *key,
 		   const unsigned char *in, size_t in_len,
 		   unsigned char **cek, size_t *cek_len);
 
+/* Encrypt/recover the CEK for any non-dir key management alg (A*KW or
+ * RSA-OAEP). jwe_decrypt_cek failure is handled by the caller via the
+ * RFC 7516 11.5 random-CEK substitution. */
+JWT_NO_EXPORT
+int jwe_encrypt_cek(jwe_key_alg_t alg, const jwk_item_t *key,
+		    const unsigned char *cek, size_t cek_len,
+		    unsigned char **out, size_t *out_len);
+JWT_NO_EXPORT
+int jwe_decrypt_cek(jwe_key_alg_t alg, const jwk_item_t *key,
+		    const unsigned char *in, size_t in_len,
+		    unsigned char **cek, size_t *cek_len);
+
+/* ECDH-ES (RFC 7518 4.6). Direct mode derives the CEK directly. */
+JWT_NO_EXPORT
+int jwe_alg_is_ecdh(jwe_key_alg_t alg);
+JWT_NO_EXPORT
+int jwe_alg_is_ecdh_direct(jwe_key_alg_t alg);
+JWT_NO_EXPORT
+int jwe_alg_is_direct(jwe_key_alg_t alg);
+JWT_NO_EXPORT
+int jwe_ecdh_derive(jwe_key_alg_t alg, jwe_enc_t enc, const jwk_item_t *key,
+		    int for_encrypt, jwt_json_t *hdr,
+		    unsigned char **dk, size_t *dk_len);
+
+/* AES Key Wrap / Unwrap with a raw KEK (ECDH-ES+A*KW agreed key). */
+JWT_NO_EXPORT
+int jwe_aeskw_wrap_raw(const unsigned char *kek, size_t kek_len,
+		       const unsigned char *cek, size_t cek_len,
+		       unsigned char **out, size_t *out_len);
+JWT_NO_EXPORT
+int jwe_aeskw_unwrap_raw(const unsigned char *kek, size_t kek_len,
+			 const unsigned char *in, size_t in_len,
+			 unsigned char **cek, size_t *cek_len);
+
 /* Dispatch JWE content encryption/decryption to the active backend for the
  * given enc. Return 0 on success. Decrypt verifies the AEAD tag. */
 JWT_NO_EXPORT
@@ -518,5 +613,32 @@ int jwe_decrypt_content(jwe_enc_t enc, const unsigned char *cek,
 JWT_NO_EXPORT
 const char *jwe_key_usage_check(const jwk_item_t *key, jwe_key_alg_t alg,
 				int for_encrypt);
+
+/* @rfc{7516,5.1} step 14 Build the Additional Authenticated Data for the AEAD.
+ * Compact and the JSON serializations agree on the base: ASCII(@protected_b64).
+ * When a JWE "aad" member is present (its base64url form passed as @aad_b64),
+ * the AAD becomes ASCII(@protected_b64 || '.' || @aad_b64). On return *@aad
+ * points at the AAD bytes and *@aad_len is its length. If *@owned is set, the
+ * caller must free *@aad; otherwise *@aad aliases @protected_b64 (the no-aad
+ * case, byte-identical to the Compact Serialization) and must not be freed.
+ * Returns 0 on success, non-zero on allocation failure. */
+JWT_NO_EXPORT
+int jwe_build_aad(const char *protected_b64, const char *aad_b64,
+		  const unsigned char **aad, size_t *aad_len, int *owned);
+
+/* Recipient list helpers (jwe.c). A recipient is heap-allocated and linked
+ * into jwe_common.recipients. jwe_recipient_first() returns the first recipient
+ * or NULL; jwe_recipient_first_or_add() returns it, creating an empty one if
+ * the list is empty (used by the legacy single-key setkey path).
+ * jwe_recipient_append() always adds a new recipient. jwe_recipient_free()
+ * frees one recipient and its owned members. */
+JWT_NO_EXPORT
+struct jwe_recipient *jwe_recipient_first(struct jwe_common *cmd);
+JWT_NO_EXPORT
+struct jwe_recipient *jwe_recipient_first_or_add(struct jwe_common *cmd);
+JWT_NO_EXPORT
+struct jwe_recipient *jwe_recipient_append(struct jwe_common *cmd);
+JWT_NO_EXPORT
+void jwe_recipient_free(struct jwe_recipient *r);
 
 #endif /* JWT_PRIVATE_H */

@@ -32,7 +32,9 @@ Standard | RFC        | Description
 - GnuTLS (>= 3.6.0)
 - MbedTLS (>= 3.6.0)
 
-@note OpenSSL is required and used for JWK(S) operations.
+@note OpenSSL is always required. All three backends parse JWK(S) natively
+(GnuTLS native parsing requires GnuTLS >= 3.8.4; older GnuTLS delegates JWK(S)
+parsing and RSA-OAEP/ECDH-ES to OpenSSL).
 
 @subsection crypto_support Algorithm support matrix
 
@@ -43,10 +45,38 @@ JWS Algorithm ``alg``         | OpenSSL                   | GnuTLS              
 ``RS256`` ``RS384`` ``RS512`` | \emoji :white_check_mark: | \emoji :white_check_mark: | \emoji :white_check_mark:
 ``EdDSA`` using ``ED25519``   | \emoji :white_check_mark: | \emoji :white_check_mark: | \emoji :x:
 ``EdDSA`` using ``ED448``     | \emoji :white_check_mark: | \emoji :white_check_mark: ``>= 3.8.8`` | \emoji :x:
-``PS256`` ``PS384`` ``PS512`` | \emoji :white_check_mark: | \emoji :white_check_mark: | \emoji :white_check_mark:*
+``PS256`` ``PS384`` ``PS512`` | \emoji :white_check_mark: | \emoji :white_check_mark: | \emoji :white_check_mark:
 ``ES256K``                    | \emoji :white_check_mark: | \emoji :x:                | \emoji :white_check_mark:
 
-``*`` RSASSA-PSS support in MbedTLS depends on [TF-PSA-Ctypto#154](https://github.com/Mbed-TLS/TF-PSA-Crypto/pull/154)
+@subsubsection jwe_support JWE
+
+LibJWT supports JWE (RFC 7516) Compact Serialization with a single recipient,
+using a key management algorithm (``alg``) plus a content encryption
+algorithm (``enc``).
+
+Legend: \emoji :white_check_mark: native implementation &middot;
+\emoji :large_blue_circle: supported, using OpenSSL as a fallback &middot;
+\emoji :x: not supported
+
+JWE key management ``alg``    | OpenSSL                   | GnuTLS                    | MbedTLS
+:---------------------------- | :------------------------ | :------------------------ | :------------------------
+``dir``                       | \emoji :white_check_mark: | \emoji :white_check_mark: | \emoji :white_check_mark:
+``A128KW`` ``A192KW`` ``A256KW`` | \emoji :white_check_mark: | \emoji :white_check_mark: | \emoji :white_check_mark:
+``RSA-OAEP`` (SHA-1)          | \emoji :white_check_mark: | \emoji :large_blue_circle: | \emoji :white_check_mark:
+``RSA-OAEP-256``              | \emoji :white_check_mark: | \emoji :white_check_mark: | \emoji :white_check_mark:
+``ECDH-ES`` (+ ``+A128KW``/``+A192KW``/``+A256KW``) | \emoji :white_check_mark: | \emoji :white_check_mark: | \emoji :white_check_mark:
+
+JWE content encryption ``enc`` | OpenSSL                   | GnuTLS                    | MbedTLS
+:----------------------------- | :------------------------ | :------------------------ | :------------------------
+``A128GCM`` ``A192GCM`` ``A256GCM`` | \emoji :white_check_mark: | \emoji :white_check_mark: | \emoji :white_check_mark:
+``A128CBC-HS256`` ``A192CBC-HS384`` ``A256CBC-HS512`` | \emoji :white_check_mark: | \emoji :white_check_mark: | \emoji :white_check_mark:
+
+@note ``ECDH-ES`` supports both Direct Key Agreement and ``+A*KW`` key
+wrapping, on the EC curves P-256/384/521 and the OKP curves X25519/X448, with
+optional ``apu``/``apv`` PartyInfo. ``RSA1_5`` and ``zip`` are intentionally
+not supported. Each backend implements JWE natively except that GnuTLS/Nettle
+cannot perform RSA-OAEP with SHA-1, so plain ``RSA-OAEP`` falls back to OpenSSL
+under the GnuTLS backend (``RSA-OAEP-256`` is native).
 
 @subsection optional Optional
 
