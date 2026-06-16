@@ -1,4 +1,4 @@
-/* Copyright (C) 2015-2025 maClara, LLC <info@maclara-llc.com>
+/* Copyright (C) 2015-2026 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -11,6 +11,7 @@
  * @brief The C JSON Web Token Library +JWK + JWKS
  *
  * @include{doc} mainpage.dox
+ * @include{doc} examples.dox
  */
 
 #ifndef JWT_H
@@ -71,6 +72,9 @@ typedef enum {
 	JWT_ALG_PS512,		/**< RSASSA-PSS using SHA-512 and MGF1 with SHA-512 */
 	JWT_ALG_ES256K,		/**< ECDSA using secp256k1 and SHA-256 */
 	JWT_ALG_EDDSA,		/**< EdDSA using Ed25519 */
+	JWT_ALG_ML_DSA_44,	/**< ML-DSA-44 (FIPS 204, RFC 9964) (experimental) */
+	JWT_ALG_ML_DSA_65,	/**< ML-DSA-65 (FIPS 204, RFC 9964) (experimental) */
+	JWT_ALG_ML_DSA_87,	/**< ML-DSA-87 (FIPS 204, RFC 9964) (experimental) */
 	JWT_ALG_INVAL,		/**< An invalid algorithm from the caller or the token */
 } jwt_alg_t;
 
@@ -169,6 +173,7 @@ typedef enum {
 	JWK_KEY_TYPE_RSA,		/**< RSA keys (RSA and RSA-PSS) */
 	JWK_KEY_TYPE_OKP,		/**< Octet Key Pair (e.g. EdDSA) */
 	JWK_KEY_TYPE_OCT,		/**< Octet sequence (e.g. HS256) */
+	JWK_KEY_TYPE_AKP,		/**< Algorithm Key Pair (e.g. ML-DSA) @rfc{9964,3} */
 } jwk_key_type_t;
 
 /** @ingroup jwks_item_grp
@@ -342,11 +347,15 @@ typedef enum {
 
 /**
  * @defgroup jwt_grp JSON Web Token
+ *
+ * @brief Create and consume JSON Web Tokens (JWS)
  * @{
  */
 
 /**
  * @defgroup jwt_builder_grp Builder
+ *
+ * @brief Create and sign JWT tokens
  *
  * Creating a JWT token involves several steps. First is creating a
  * jwt_builder_t object, which can be thought of as a JWT factory. Once
@@ -613,6 +622,8 @@ char *jwt_builder_generate(jwt_builder_t *builder);
 /**
  * @defgroup jwt_checker_grp Checker
  *
+ * @brief Verify and validate JWT tokens
+ *
  * Validating a JWT involves decoding the Base64url parts of the JWT then
  * verifying claims and the signature hash. The checker object allows you to
  * configure how you want to perform these steps so you can easily process
@@ -816,6 +827,8 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
 /**
  * @defgroup jwt_claims_grp Claims and Headers
  *
+ * @brief Get and set JWT claims and header parameters
+ *
  * Working with claims and header elements across checker and builder
  * objects is similar, but the usage for it is not.
  *
@@ -824,11 +837,15 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
 
 /**
  * @defgroup jwt_claims_helpers_grp Utility Functions
+ *
+ * @brief Set up a jwt_value_t for getting and setting claims and headers
  * @{
  */
 
 /**
  * @defgroup jwt_helpers_get_grp Getters
+ *
+ * @brief Set up a jwt_value_t to retrieve a claim or header value
  *
  * When getting a value, you must set type and name. On a successful return, the
  * the value specific to the type will be filled in. Common error responses for
@@ -912,6 +929,8 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
 
 /**
  * @defgroup jwt_helpers_set_grp Setters
+ *
+ * @brief Set up a jwt_value_t to store a claim or header value
  *
  * When setting a value, you must set the type, name, and the specific val for
  * the type. If the value already exists, then the function will return
@@ -1006,6 +1025,8 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
 
 /**
  * @defgroup jwt_claims_builder_grp Builder Functions
+ *
+ * @brief Get, set, and delete claims and headers on a builder object
  *
  * For the builder function, you can create a set of values in the header and
  * payload that will be copied verbatim to any token generated from it. The
@@ -1119,6 +1140,8 @@ int jwt_builder_time_offset(jwt_builder_t *builder, jwt_claims_t claim,
 /**
  * @defgroup jwt_claims_checker_grp Checker Functions
  *
+ * @brief Get, set, and delete the claims a checker validates
+ *
  * For a checker object, claims will be used to verify the token. This
  * verification is very simplistic and only supports standards-defined
  * claims like ``nbf``, ``iss``, etc. Even for some of these, LibJWT can
@@ -1129,13 +1152,24 @@ int jwt_builder_time_offset(jwt_builder_t *builder, jwt_claims_t claim,
  * This is a list of the claims that LibJWT can check on its own, and the
  * method that is used to decide success:
  *
- * Claim   | Type      | Comparison for Validation
- * ------- | --------- | -----------------------------
- * ``exp`` | Timestamp | ``exp`` > (now + leeway)
- * ``nbf`` | Timestamp | ``nbf`` <= (now - leeway)
- * ``iss`` | String    | !strcmp(``iss``, ``userval``)
- * ``aud`` | String    | !strcmp(``aud``, ``userval``)
- * ``sub`` | String    | !strcmp(``sub``, ``userval``)
+ * Claim   | Type            | Comparison for Validation
+ * ------- | --------------- | -----------------------------
+ * ``exp`` | Timestamp       | ``exp`` > (now + leeway)
+ * ``nbf`` | Timestamp       | ``nbf`` <= (now - leeway)
+ * ``iss`` | String          | !strcmp(``iss``, ``userval``)
+ * ``aud`` | String or Array | ``userval`` equals ``aud``, or is among its elements
+ * ``sub`` | String          | !strcmp(``sub``, ``userval``)
+ *
+ * @note Validation is "validate if present": enabling a check (e.g.
+ * ``JWT_CLAIM_EXP``) only fails a token when the claim @b is present and does
+ * not satisfy the comparison above. A token that @b omits the claim passes the
+ * check. In particular, enabling ``JWT_CLAIM_EXP`` does @b not by itself
+ * require that a token carry an ``exp``; if you must reject tokens lacking a
+ * given claim, enforce that in a callback.
+ *
+ * @note Per @rfc{7519,4.1.3}, ``aud`` may be a single string or an array of
+ * strings; the token is accepted when your configured audience matches the
+ * string or appears among the array elements.
  *
  * @note The checker object does not evaluate any values in the header with
  * the exception of the ``alg`` element when validating a token. Anything you
@@ -1200,6 +1234,8 @@ int jwt_checker_time_leeway(jwt_checker_t *checker, jwt_claims_t claim,
 
 /**
  * @defgroup jwt_object_grp JWT Functions
+ *
+ * @brief Get and set claims and headers on a jwt_t during a callback
  *
  * For most usage, setting values in the builder object is enough to provide
  * all the information you would like set in a JWT token. However, if some
@@ -1290,6 +1326,8 @@ jwt_value_error_t jwt_claim_del(jwt_t *jwt, const char *claim);
 
 /**
  * @defgroup jwt_alg_grp Algorithms
+ *
+ * @brief Convert between algorithm types and their string names
  *
  * Utility functions to convert between string and type for ``alg``
  * @{
@@ -1407,6 +1445,8 @@ jwe_enc_t jwe_str_enc(const char *enc);
 
 /**
  * @defgroup jwe_builder_grp Builder
+ *
+ * @brief Create and encrypt JWE tokens
  *
  * Creating a JWE token mirrors the JWS builder: create a jwe_builder_t,
  * configure it with a recipient key plus a key management (``"alg"``) and
@@ -1690,6 +1730,8 @@ char *jwe_builder_generate(jwe_builder_t *builder,
 /**
  * @defgroup jwe_checker_grp Checker
  *
+ * @brief Decrypt and authenticate JWE tokens
+ *
  * Consuming a JWE token mirrors the JWS checker: create a jwe_checker_t,
  * configure it with the key and the expected algorithms, then decrypt and
  * authenticate tokens.
@@ -1836,11 +1878,15 @@ const unsigned char *jwe_checker_get_aad(const jwe_checker_t *checker,
 
 /**
  * @defgroup jwks_grp JSON Web Keys
+ *
+ * @brief Load and use JSON Web Keys (JWK) and Key Sets (JWKS)
  * @{
  */
 
 /**
  * @defgroup jwks_core_grp JWK Management
+ *
+ * @brief Create and manage keyrings of JWK and JWKS keys
  *
  * Functions to handle JSON that represents JWK and JWKS for use in validating
  * or signing JWT objects.
@@ -1946,8 +1992,12 @@ jwk_set_t *jwks_load_fromfp(jwk_set_t *jwk_set, FILE *input);
  *   to add new keys to it.
  * @param url A string URL to where the JSON representation of a single key
  *   or array of "keys" can be retrieved from. Generally a json file.
- * @param verify Set to 1 to verify the Host, 2 to verify Host and Peer.
- *   2 is recommended unless you really need to disable with 0.
+ * @param verify Set to non-zero to fully verify the TLS connection
+ *   (certificate chain/peer @b and hostname); set to 0 to disable
+ *   verification entirely. Non-zero is strongly recommended: hostname
+ *   verification on its own is meaningless, so any value >= 1 enables
+ *   both peer and host verification. 0 disables all verification and is
+ *   insecure (use only for testing).
  * @return A valid jwt_set_t on success. On failure, either NULL
  *   or a jwt_set_t with error set. NULL generally means ENOMEM.
  */
@@ -1986,6 +2036,80 @@ jwk_set_t *jwks_create_fromfp(FILE *input);
  */
 JWT_EXPORT
 jwk_set_t *jwks_create_fromurl(const char *url, int verify);
+
+/**
+ * @brief Flags controlling how a native key is imported into a keyring
+ *
+ * Used with the jwks_load_fromkey() and jwks_create_fromkey() family. The
+ * input to those functions may be a PEM file, a DER file, or (with
+ * ::JWK_KEY_TRY_HMAC) raw bytes treated as an HMAC key, so these flags are
+ * named JWK_KEY_* rather than anything PEM-specific.
+ */
+typedef enum {
+	JWK_KEY_NONE		= 0x0000,	/**< No options */
+	JWK_KEY_GEN_KID		= 0x0001,	/**< Generate a random (uuidv4)
+						     "kid" for each imported key */
+	JWK_KEY_TRY_HMAC	= 0x0002,	/**< If the input does not parse
+						     as a PEM/DER key, treat the
+						     raw bytes as an "oct" (HMAC)
+						     key */
+} jwk_key_flags_t;
+
+/**
+ * @brief Create or add to a keyring by importing a native key
+ *
+ * Import a key that is NOT already in JWK form — a PEM or DER encoded public
+ * or private key (RSA, RSA-PSS, EC, or EdDSA), or (with ::JWK_KEY_TRY_HMAC)
+ * raw bytes treated as an HMAC key — and convert it into a JWK in the keyring.
+ * This is the inverse of jwks_item_pem().
+ *
+ * As with jwks_load(), pass NULL as @p jwk_set to create a new keyring, or an
+ * existing one to add to it. On success you should check jwks_error() and
+ * jwks_error_any() as with any other loader.
+ *
+ * @param jwk_set Either NULL to create a new set, or an existing jwk_set_t to
+ *   add the imported key to.
+ * @param key A buffer holding a single PEM, DER, or raw key.
+ * @param len The length of @p key in bytes.
+ * @param flags A bitwise OR of ::jwk_key_flags_t values (or ::JWK_KEY_NONE).
+ * @return A valid jwk_set_t on success. On failure, either NULL or a
+ *   jwk_set_t with error set. NULL generally means ENOMEM or that the key
+ *   could not be parsed.
+ */
+JWT_EXPORT
+jwk_set_t *jwks_load_fromkey(jwk_set_t *jwk_set, const char *key,
+			     const size_t len, unsigned int flags);
+
+/**
+ * @brief Create or add to a keyring by importing a native key from a file
+ *
+ * Like jwks_load_fromkey(), but reads the key from a file (PEM or DER).
+ *
+ * @param jwk_set Either NULL to create a new set, or an existing jwk_set_t to
+ *   add the imported key to.
+ * @param file_name Path to a file holding a single PEM, DER, or raw key.
+ * @param flags A bitwise OR of ::jwk_key_flags_t values (or ::JWK_KEY_NONE).
+ * @return A valid jwk_set_t on success. On failure, either NULL or a
+ *   jwk_set_t with error set.
+ */
+JWT_EXPORT
+jwk_set_t *jwks_load_fromkey_file(jwk_set_t *jwk_set, const char *file_name,
+				  unsigned int flags);
+
+/**
+ * @brief Wrapper around jwks_load_fromkey() that explicitly creates a new
+ *  keyring
+ */
+JWT_EXPORT
+jwk_set_t *jwks_create_fromkey(const char *key, const size_t len,
+			       unsigned int flags);
+
+/**
+ * @brief Wrapper around jwks_load_fromkey_file() that explicitly creates a new
+ *  keyring
+ */
+JWT_EXPORT
+jwk_set_t *jwks_create_fromkey_file(const char *file_name, unsigned int flags);
 
 /**
  * @brief Check if there is an error with a jwk_set
@@ -2064,6 +2188,8 @@ static inline void jwks_freep(jwk_set_t **jwks) {
 
 /**
  * @defgroup jwks_item_grp JSON Web Key Usage
+ *
+ * @brief Inspect and use individual JWK items from a keyring
  *
  * Functionality for using a JWK (represented as a jwk_item_t) to sign and
  * validate JWT objects.
@@ -2201,6 +2327,36 @@ JWT_EXPORT
 const char *jwks_item_pem(const jwk_item_t *item);
 
 /**
+ * @brief Serialize a single JWK item to a JWK JSON string
+ *
+ * Produces the JSON Web Key representation of this item. This is the
+ * serialization counterpart to the jwks_load_fromkey() import path.
+ *
+ * @param item A JWK Item
+ * @param priv If non-zero, include private key parameters when the item is a
+ *   private key. If zero, only public parameters are emitted.
+ * @return A newly allocated, nil-terminated JSON string the caller must free
+ *   with free(), or NULL on error.
+ */
+JWT_EXPORT
+char *jwks_item_export(const jwk_item_t *item, int priv);
+
+/**
+ * @brief Serialize a whole keyring to a JWKS JSON string
+ *
+ * Produces a JWK Set (an object with a @c "keys" array) containing every item
+ * in the set.
+ *
+ * @param jwk_set An existing jwk_set_t
+ * @param priv If non-zero, include private key parameters for private keys. If
+ *   zero, only public parameters are emitted.
+ * @return A newly allocated, nil-terminated JSON string the caller must free
+ *   with free(), or NULL on error.
+ */
+JWT_EXPORT
+char *jwks_export(const jwk_set_t *jwk_set, int priv);
+
+/**
  * @brief Retrieve binary octet data of a key
  *
  * Only valid for JWT_KEY_TYPE_OCT.
@@ -2280,11 +2436,16 @@ size_t jwks_item_count(const jwk_set_t *jwk_set);
 
 /**
  * @defgroup jwt_advanced_grp Advanced Functionality
+ *
+ * @brief Configure memory allocators and crypto backends
  * @{
  */
 
 /**
  * @defgroup jwt_memory_grp Memory Handlers
+ *
+ * @brief Get or set the memory allocation functions LibJWT uses
+ *
  * These functions allow you to get or set memory allocation functions.
  * @{
  */
@@ -2330,6 +2491,9 @@ void jwt_get_alloc(jwt_malloc_t *pmalloc, jwt_free_t *pfree);
 
 /**
  * @defgroup jwt_crypto_grp Cryptographic Ops
+ *
+ * @brief Select which crypto backend LibJWT uses
+ *
  * Functions used to set and get which crypto operations are used
  *
  * LibJWT supports several crypto libraries, mainly "openssl", "gnutls",

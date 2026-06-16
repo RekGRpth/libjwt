@@ -1,4 +1,4 @@
-/* Copyright (C) 2024-2025 maClara, LLC <info@maclara-llc.com>
+/* Copyright (C) 2024-2026 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -85,7 +85,7 @@ static void jwk_process_values(jwt_json_t *jwk, jwk_item_t *item)
 	j_kid = jwt_json_obj_get(jwk, "kid");
 	if (j_kid && jwt_json_is_string(j_kid)) {
 		const char *kid = jwt_json_str_val(j_kid);
-		int len = strlen(kid);
+		size_t len = strlen(kid);
 
 		if (len) {
 			item->kid = jwt_malloc(len + 1);
@@ -95,7 +95,7 @@ static void jwk_process_values(jwt_json_t *jwk, jwk_item_t *item)
 					"Error allocating memory for kid");
 				// LCOV_EXCL_STOP
 			} else { // LCOV_EXCL_LINE
-				strcpy(item->kid, kid);
+				memcpy(item->kid, kid, len + 1);
 			}
 		}
 	}
@@ -122,17 +122,19 @@ static int process_octet(jwt_json_t *jwk, jwk_item_t *item)
 
 	bin_k = jwt_base64uri_decode(str_k, &len_k);
 	if (bin_k == NULL) {
-		// LCOV_EXCL_START
+		/* Reachable: jwt_base64uri_decode returns NULL for a non-base64url
+		 * "k" (exercised by test_jwks_oct_invalid_base64). */
 		jwt_write_error(item, "Invalid JWK: failed to decode `k`");
 		return -1;
-		// LCOV_EXCL_STOP
 	}
 
 	item->is_private_key = 1;
 	item->provider = JWT_CRYPTO_OPS_ANY;
 	item->oct.key = bin_k;
 	item->oct.len = len_k;
-	item->bits = len_k * 8;
+	/* Compute in size_t: len_k * 8 in int overflows (UB) for a decoded key
+	 * larger than INT_MAX/8, yielding a bogus bit count. len_k > 0 here. */
+	item->bits = (size_t)len_k * 8;
 
 	return 0;
 }
@@ -156,7 +158,13 @@ static jwk_item_t *jwk_process_one(jwk_set_t *jwk_set, jwt_json_t *jwk)
 	item->json = jwt_json_clone(jwk);
 	if (item->json == NULL) {
 		// LCOV_EXCL_START
-		jwt_freemem(jwk);
+		/* Only free what this function owns: the jwk_item_t allocated
+		 * above. "jwk" is a borrowed reference into the caller-owned
+		 * parsed JSON tree (j_all or an array element) and must not be
+		 * freed here; doing so with jwt_freemem() (a raw free of a live,
+		 * refcounted json object) would corrupt that tree and double-free
+		 * it when the caller releases it. item->json is NULL here. */
+		jwt_freemem(item);
 		jwt_write_error(jwk_set,
 			"Error allocating memory for jwk_item_t");
 		return NULL;
@@ -180,6 +188,20 @@ static jwk_item_t *jwk_process_one(jwk_set_t *jwk_set, jwt_json_t *jwk)
 	} else if (!strcmp(kty, "OKP")) {
 		item->kty = JWK_KEY_TYPE_OKP;
 		jwt_ops->process_eddsa(item->json, item);
+#ifdef LIBJWT_HAVE_ML_DSA
+	} else if (!strcmp(kty, "AKP")) {
+		item->kty = JWK_KEY_TYPE_AKP;
+		/* Unlike the other process_* ops, process_mldsa may be NULL:
+		 * only backends with ML-DSA support set it. Fail cleanly
+		 * rather than dereferencing a NULL pointer. */
+		if (jwt_ops->process_mldsa == NULL) {
+			jwt_write_error(item, "ML-DSA (AKP) keys are not "
+					"supported by the %s backend",
+					jwt_ops->name);
+			return item;
+		}
+		jwt_ops->process_mldsa(item->json, item);
+#endif
 	} else if (!strcmp(kty, "oct")) {
 		item->kty = JWK_KEY_TYPE_OCT;
 		process_octet(item->json, item);
@@ -576,4 +598,203 @@ jwk_set_t *jwks_create_fromfile(const char *file_name)
 jwk_set_t *jwks_create_fromfp(FILE *input)
 {
 	return jwks_load_fromfp(NULL, input);
+}
+
+/* Run each JWK JSON object produced by the key2jwk backend op through the same
+ * per-item path used for a parsed JWKS, so the resulting jwk_item_t is built
+ * identically. */
+static void jwks_process_array(jwk_set_t *jwk_set, jwt_json_t *j_array)
+{
+	jwk_item_t *jwk_item;
+	jwt_json_t *j_item;
+	size_t i;
+
+	jwt_json_arr_foreach(j_array, i, j_item) {
+		jwk_item = jwk_process_one(jwk_set, j_item);
+		if (jwk_item != NULL)
+			jwks_item_add(jwk_set, jwk_item);
+	}
+}
+
+jwk_set_t *jwks_load_fromkey(jwk_set_t *jwk_set, const char *key,
+			     const size_t len, unsigned int flags)
+{
+	jwt_json_auto_t *j_array = NULL;
+
+	if (key == NULL || len == 0)
+		return NULL;
+
+	if (jwk_set == NULL)
+		jwk_set = jwks_new();
+	if (jwk_set == NULL)
+		return NULL; // LCOV_EXCL_LINE
+
+	j_array = jwt_json_create_arr();
+	if (j_array == NULL)
+		return jwk_set; // LCOV_EXCL_LINE
+
+	if (jwt_key2jwk(key, len, flags, j_array)) {
+		jwt_write_error(jwk_set, "Could not parse key as PEM, DER, "
+				"or HMAC");
+		return jwk_set;
+	}
+
+	jwks_process_array(jwk_set, j_array);
+
+	return jwk_set;
+}
+
+jwk_set_t *jwks_load_fromkey_file(jwk_set_t *jwk_set, const char *file_name,
+				  unsigned int flags)
+{
+	jwk_set_t *ret;
+	char *buf;
+	size_t len;
+	long size;
+	FILE *fp;
+
+	if (file_name == NULL)
+		return NULL;
+
+	fp = fopen(file_name, "rb");
+	if (fp == NULL)
+		return NULL;
+
+	if (fseek(fp, 0, SEEK_END) || (size = ftell(fp)) < 0) {
+		// LCOV_EXCL_START
+		fclose(fp);
+		return NULL;
+		// LCOV_EXCL_STOP
+	}
+	rewind(fp);
+
+	buf = jwt_malloc(size);
+	if (buf == NULL) {
+		// LCOV_EXCL_START
+		fclose(fp);
+		return NULL;
+		// LCOV_EXCL_STOP
+	}
+
+	len = fread(buf, 1, size, fp);
+	fclose(fp);
+
+	if (len != (size_t)size) {
+		// LCOV_EXCL_START
+		jwt_freemem(buf);
+		return NULL;
+		// LCOV_EXCL_STOP
+	}
+
+	ret = jwks_load_fromkey(jwk_set, buf, len, flags);
+
+	jwt_freemem(buf);
+
+	return ret;
+}
+
+jwk_set_t *jwks_create_fromkey(const char *key, const size_t len,
+			       unsigned int flags)
+{
+	return jwks_load_fromkey(NULL, key, len, flags);
+}
+
+jwk_set_t *jwks_create_fromkey_file(const char *file_name, unsigned int flags)
+{
+	return jwks_load_fromkey_file(NULL, file_name, flags);
+}
+
+/* The private members for each key type, used to strip a JWK down to its
+ * public form. The returned array is NULL-terminated. */
+static const char **jwk_priv_members(jwk_key_type_t kty)
+{
+	static const char *rsa[] = { "d", "p", "q", "dp", "dq", "qi", NULL };
+	static const char *ec_okp[] = { "d", NULL };
+	static const char *oct[] = { "k", NULL };
+	static const char *none[] = { NULL };
+#ifdef LIBJWT_HAVE_ML_DSA
+	static const char *akp[] = { "priv", NULL };
+#endif
+
+	switch (kty) {
+	case JWK_KEY_TYPE_RSA:
+		return rsa;
+	case JWK_KEY_TYPE_EC:
+	case JWK_KEY_TYPE_OKP:
+		return ec_okp;
+	case JWK_KEY_TYPE_OCT:
+		return oct;
+#ifdef LIBJWT_HAVE_ML_DSA
+	case JWK_KEY_TYPE_AKP:
+		return akp;
+#endif
+	// LCOV_EXCL_START
+	default:
+		return none;
+	// LCOV_EXCL_STOP
+	}
+}
+
+/* Strip the private members from a JWK JSON object in place. */
+static void jwk_strip_private(jwt_json_t *jwk, jwk_key_type_t kty)
+{
+	const char **members = jwk_priv_members(kty);
+	size_t i;
+
+	for (i = 0; members[i] != NULL; i++)
+		jwt_json_obj_del(jwk, members[i]);
+}
+
+char *jwks_item_export(const jwk_item_t *item, int priv)
+{
+	jwt_json_auto_t *clone = NULL;
+
+	if (item == NULL || item->json == NULL)
+		return NULL;
+
+	clone = jwt_json_clone(item->json);
+	if (clone == NULL)
+		return NULL; // LCOV_EXCL_LINE
+
+	if (!priv)
+		jwk_strip_private(clone, item->kty);
+
+	return jwt_json_serialize(clone, JWT_JSON_INDENT(2));
+}
+
+char *jwks_export(const jwk_set_t *jwk_set, int priv)
+{
+	jwt_json_auto_t *root = NULL;
+	jwt_json_t *keys;
+	jwk_item_t *item;
+
+	if (jwk_set == NULL)
+		return NULL;
+
+	root = jwt_json_create();
+	if (root == NULL)
+		return NULL; // LCOV_EXCL_LINE
+
+	keys = jwt_json_create_arr();
+	if (keys == NULL)
+		return NULL; // LCOV_EXCL_LINE
+	jwt_json_obj_set(root, "keys", keys);
+
+	list_for_each_entry(item, &jwk_set->head, node) {
+		jwt_json_t *clone;
+
+		if (item->json == NULL)
+			continue; // LCOV_EXCL_LINE
+
+		clone = jwt_json_clone(item->json);
+		if (clone == NULL)
+			continue; // LCOV_EXCL_LINE
+
+		if (!priv)
+			jwk_strip_private(clone, item->kty);
+
+		jwt_json_arr_append(keys, clone);
+	}
+
+	return jwt_json_serialize(root, JWT_JSON_INDENT(2));
 }

@@ -1,12 +1,9 @@
-![LibJWT - The C JWT Library](images/LibJWT-800x152.png)
+![LibJWT - The C JWT Library](images/social-preview.png)
 ---
 
 [![codecov](https://codecov.io/gh/benmcollins/libjwt/graph/badge.svg?token=MhCaZ8cpwQ)](https://codecov.io/gh/benmcollins/libjwt)
 
 [![maClara](https://img.shields.io/badge/Sponsored%20by-maClara%2C%20LLC-blue?style=plastic&logoColor=blue)](https://maclara-llc.com)
-
-> [!WARNING]
-> Version 3 of LibJWT is a complete overhaul of the code. Please see documentation for usage.
 
 ## :bulb: Supported Standards
 
@@ -28,17 +25,21 @@ Standard | RFC                                                                  
 
 ### Required
 
-- [JANSSON](https://github.com/akheron/jansson) (>= 2.0)
+- A JSON library: either [Jansson](https://github.com/akheron/jansson)
+  (>= 2.0, the default) or [json-c](https://github.com/json-c/json-c)
+  (>= 0.16, selected with ``-DWITH_JSON_C=ON``). The two are interchangeable.
 - [CMake](https://cmake.org) (>= 3.7)
 
 ### Crypto support
 
 - OpenSSL (>= 3.0.0)
-- GnuTLS (>= 3.6.0)
+- GnuTLS (>= 3.8.8)
 - MbedTLS (>= 3.6.0)
 
 > [!NOTE]
-> OpenSSL is required and used for JWK(S) operations.
+> At least one crypto backend is required, but any non-empty combination
+> works. OpenSSL is enabled by default and can be disabled with
+> ``-DWITH_OPENSSL=OFF``. Each backend parses and converts JWK(S) natively.
 
 ### Algorithm support matrix
 
@@ -48,9 +49,18 @@ JWS Algorithm ``alg``         | OpenSSL            | GnuTLS             | MbedTL
 ``ES256`` ``ES384`` ``ES512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``RS256`` ``RS384`` ``RS512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``EdDSA`` using ``ED25519``   | :white_check_mark: | :white_check_mark: | :x:
-``EdDSA`` using ``ED448``     | :white_check_mark: | :white_check_mark: ``>= 3.8.8`` | :x:
+``EdDSA`` using ``ED448``     | :white_check_mark: | :white_check_mark: | :x:
 ``PS256`` ``PS384`` ``PS512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``ES256K``                    | :white_check_mark: | :x:                | :white_check_mark:
+``ML-DSA-44/65/87`` [^mldsa]  | :white_check_mark: | :x:                | :x:
+
+[^mldsa]: ML-DSA (FIPS 204, registered for JOSE by
+[RFC 9964](https://datatracker.ietf.org/doc/rfc9964/)) is **experimental** and
+**off by default**. Build with ``-DWITH_ML_DSA=ON``; it is only enabled when a
+backend with ML-DSA support is present (OpenSSL >= 3.5 today). When built in,
+the public header defines ``LIBJWT_HAVE_ML_DSA``. ML-DSA keys use the ``"AKP"``
+key type with a ``"pub"`` member and a ``"priv"`` member holding the 32-byte
+FIPS-204 seed. GnuTLS and MbedTLS support is not yet implemented.
 
 #### JWE
 
@@ -70,14 +80,13 @@ each recipient wraps that CEK independently, so any recipient's key can decrypt
 the token. They also carry an optional shared unprotected header, per-recipient
 headers, and an application AAD member.
 
-Legend: :white_check_mark: native implementation &nbsp;·&nbsp;
-:large_blue_circle: supported, using OpenSSL as a fallback &nbsp;·&nbsp; :x: not supported
+Legend: :white_check_mark: native implementation &nbsp;·&nbsp; :x: not supported
 
 JWE key management ``alg``    | OpenSSL            | GnuTLS             | MbedTLS
 :---------------------------- | :----------------- | :----------------- | :-----------------
 ``dir`` (Direct Encryption)   | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``A128KW`` ``A192KW`` ``A256KW`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
-``RSA-OAEP`` (SHA-1)          | :white_check_mark: | :large_blue_circle: | :white_check_mark:
+``RSA-OAEP`` (SHA-1)          | :white_check_mark: | :x:                | :white_check_mark:
 ``RSA-OAEP-256``              | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``ECDH-ES`` (+ ``+A128KW``/``+A192KW``/``+A256KW``) | :white_check_mark: | :white_check_mark: | :white_check_mark:
 
@@ -91,9 +100,9 @@ JWE content encryption ``enc`` | OpenSSL            | GnuTLS             | MbedT
 > wrapping modes, on the EC curves P-256/384/521 and the OKP curves
 > X25519/X448, with optional ``apu``/``apv`` PartyInfo. ``RSA1_5`` and
 > ``zip`` (compression) are intentionally not supported. Each backend
-> implements JWE natively, with one exception: GnuTLS/Nettle cannot perform
-> RSA-OAEP with SHA-1, so plain ``RSA-OAEP`` falls back to OpenSSL under the
-> GnuTLS backend (``RSA-OAEP-256`` is native).
+> implements JWE natively. GnuTLS/Nettle cannot perform RSA-OAEP with SHA-1,
+> so the GnuTLS backend does not support plain ``RSA-OAEP`` (``RSA-OAEP-256``
+> is native).
 
 ### Optional
 

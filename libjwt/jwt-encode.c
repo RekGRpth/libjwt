@@ -1,4 +1,4 @@
-/* Copyright (C) 2015-2025 maClara, LLC <info@maclara-llc.com>
+/* Copyright (C) 2015-2026 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -253,6 +253,16 @@ static int jwt_encode(jwt_t *jwt, char **out)
 	if (payload_len <= 0) {
 		// LCOV_EXCL_START
 		jwt_write_error(jwt, "Error encoding payload");
+		return 1;
+		// LCOV_EXCL_STOP
+	}
+
+	/* head_len and payload_len are each bounded by jwt_base64uri_encode to
+	 * encode within INT_MAX, but guard their sum so head_len + payload_len + 3
+	 * cannot overflow the int allocation size below. */
+	if (head_len > INT_MAX - payload_len - 3) {
+		// LCOV_EXCL_START
+		jwt_write_error(jwt, "Encoded token too large");
 		return 1;
 		// LCOV_EXCL_STOP
 	}

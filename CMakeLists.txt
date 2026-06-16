@@ -1,4 +1,4 @@
-# Copyright (C) 2015-2025 maClara, LLC <info@maclara-llc.com>
+# Copyright (C) 2015-2026 maClara, LLC <info@maclara-llc.com>
 # This file is part of the JWT C Library
 #
 # SPDX-License-Identifier:  MPL-2.0
@@ -45,13 +45,15 @@ option(WITH_MBEDTLS "Whether to use mbedTLS (default is OFF)" OFF)
 option(WITH_LIBCURL "Whether to include CUrl for retrieving JWKS (default is OFF)" OFF)
 option(WITH_TESTS "Whether to build and run the testsuite (default is ON)" ON)
 option(WITH_KCAPI_MD "Whether to use the Linux Kernel Crypto API to offload hmac (default OFF)" OFF)
+option(WITH_OPENSSL "Whether to use OpenSSL (default is ON)" ON)
+option(WITH_ML_DSA "Whether to enable experimental ML-DSA (FIPS 204) support (default is OFF)" OFF)
 
 # Optional
 if (WITH_GNUTLS)
 	if (NOT GNUTLS_AUTO)
 		set(GNUTLS_REQUIRED REQUIRED)
 	endif()
-	pkg_check_modules(GNUTLS gnutls>=3.6.0 IMPORTED_TARGET
+	pkg_check_modules(GNUTLS gnutls>=3.8.8 IMPORTED_TARGET
 			  ${GNUTLS_REQUIRED})
 endif()
 
@@ -67,9 +69,28 @@ if (WITH_KCAPI_MD)
 	find_library(HAVE_KCAPI kcapi REQUIRED)
 endif()
 
-# Required
-pkg_check_modules(OPENSSL openssl>=3.0.0 IMPORTED_TARGET
-		  REQUIRED)
+# Optional (default ON). OpenSSL was historically mandatory; it is now one of
+# the interchangeable crypto backends, like GnuTLS and MbedTLS.
+if (WITH_OPENSSL)
+	pkg_check_modules(OPENSSL openssl>=3.0.0 IMPORTED_TARGET REQUIRED)
+endif()
+
+# Experimental ML-DSA (FIPS 204 / RFC 9964) support. Only OpenSSL >= 3.5 has a
+# real implementation today; GnuTLS and MbedTLS cleanly reject ML-DSA keys.
+# This drives the public LIBJWT_HAVE_ML_DSA macro (emitted in jwt_export.h)
+# which in turn gates every ML-DSA code path. Do NOT bump the OpenSSL floor
+# above; this is an additive capability check, not a new minimum.
+if (WITH_ML_DSA)
+	if (OPENSSL_FOUND AND OPENSSL_VERSION VERSION_GREATER_EQUAL 3.5)
+		set(LIBJWT_HAVE_ML_DSA ON)
+		message(STATUS
+			"ML-DSA (experimental) enabled via OpenSSL ${OPENSSL_VERSION}")
+	else()
+		message(WARNING
+			"WITH_ML_DSA was requested but no capable crypto backend "
+			"was found (needs OpenSSL >= 3.5); ML-DSA stays disabled")
+	endif()
+endif()
 
 add_library(jwt SHARED)
 add_library(jwt_static STATIC)
@@ -130,7 +151,8 @@ set(JWT_SOURCES libjwt/jwt-memory.c
 	libjwt/jwe.c
 	libjwt/jwe-builder.c
 	libjwt/jwe-checker.c
-	libjwt/jwks-curl.c)
+	libjwt/jwks-curl.c
+	libjwt/jwk-export.c)
 
 # Allow building without deprecated functions (suggested)
 option(EXCLUDE_DEPRECATED
@@ -169,6 +191,7 @@ if (GNUTLS_FOUND)
 	target_link_libraries(jwt_static PUBLIC PkgConfig::GNUTLS)
 	list(APPEND JWT_SOURCES
 	     libjwt/gnutls/jwk-parse.c
+	     libjwt/gnutls/jwk-export.c
 	     libjwt/gnutls/sign-verify.c
 	     libjwt/gnutls/jwe.c)
 endif()
@@ -180,18 +203,22 @@ if (MBEDTLS_FOUND)
 	target_link_libraries(jwt_static PUBLIC PkgConfig::MBEDTLS)
 	list(APPEND JWT_SOURCES
 	     libjwt/mbedtls/jwk-parse.c
+	     libjwt/mbedtls/jwk-export.c
 	     libjwt/mbedtls/sign-verify.c
 	     libjwt/mbedtls/jwe.c)
 endif()
 
-set(HAVE_CRYPTO TRUE)
-add_definitions(-DHAVE_OPENSSL)
-target_link_libraries(jwt PUBLIC PkgConfig::OPENSSL)
-target_link_libraries(jwt_static PUBLIC PkgConfig::OPENSSL)
-list(APPEND JWT_SOURCES
-     libjwt/openssl/jwk-parse.c
-     libjwt/openssl/sign-verify.c
-     libjwt/openssl/jwe.c)
+if (OPENSSL_FOUND)
+	set(HAVE_CRYPTO TRUE)
+	add_definitions(-DHAVE_OPENSSL)
+	target_link_libraries(jwt PUBLIC PkgConfig::OPENSSL)
+	target_link_libraries(jwt_static PUBLIC PkgConfig::OPENSSL)
+	list(APPEND JWT_SOURCES
+	     libjwt/openssl/jwk-parse.c
+	     libjwt/openssl/jwk-export.c
+	     libjwt/openssl/sign-verify.c
+	     libjwt/openssl/jwe.c)
+endif()
 
 if (LIBCURL_FOUND)
 	add_definitions(-DHAVE_LIBCURL)
@@ -202,31 +229,17 @@ endif()
 set(TOOLS)
 
 function(jwt_add_tool)
-	set(options STATIC)
 	set(oneValueArgs NAME SRC DIR)
-	cmake_parse_arguments(Tool "${options}" "${oneValueArgs}" "" ${ARGN})
+	cmake_parse_arguments(Tool "" "${oneValueArgs}" "" ${ARGN})
 
 	list(APPEND TOOLS ${Tool_NAME})
 	add_executable(${Tool_NAME} ${Tool_SRC})
-	if (Tool_STATIC)
-		# Some tools reach into LibJWT internals (e.g. key2jwk uses
-		# jwt-private.h) that are not exported from the shared library,
-		# so they must link the static archive. Tracked in #275: once
-		# that logic moves into libjwt as exported public API, drop the
-		# STATIC flag and let these link the shared library too.
-		target_link_libraries(${Tool_NAME}
-			PRIVATE jwt_static PkgConfig::OPENSSL)
-		set_target_properties(${Tool_NAME} PROPERTIES
-			RUNTIME_OUTPUT_DIRECTORY
-			"${CMAKE_BINARY_DIR}/tools"
-			COMPILE_FLAGS -DJWT_STATIC_DEFINE)
-	else()
-		target_link_libraries(${Tool_NAME}
-			PRIVATE jwt PkgConfig::OPENSSL)
-		set_target_properties(${Tool_NAME} PROPERTIES
-			RUNTIME_OUTPUT_DIRECTORY
-			"${CMAKE_BINARY_DIR}/tools")
-	endif()
+	# Tools use only the public libjwt API; they need no crypto backend link.
+	target_link_libraries(${Tool_NAME}
+		PRIVATE jwt)
+	set_target_properties(${Tool_NAME} PROPERTIES
+		RUNTIME_OUTPUT_DIRECTORY
+		"${CMAKE_BINARY_DIR}/tools")
 	install(TARGETS ${Tool_NAME}
 		RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endfunction()
@@ -237,7 +250,7 @@ jwt_add_tool(NAME jwt-generate
 	     SRC tools/jwt-generate.c)
 jwt_add_tool(NAME jwk2key
 	     SRC tools/jwk2key.c)
-jwt_add_tool(NAME key2jwk STATIC
+jwt_add_tool(NAME key2jwk
 	     SRC tools/key2jwk.c)
 jwt_add_tool(NAME jwe-encrypt
 	     SRC tools/jwe-encrypt.c)
@@ -308,6 +321,25 @@ foreach (FLAG ${_JSON_LDFLAGS} ${OPENSSL_LDFLAGS} ${GNUTLS_LDFLAGS}
 	string(APPEND LIBJWT_LDFLAGS " " ${FLAG})
 endforeach()
 
+# Populate the pkg-config "Requires" line from the actually-enabled backends,
+# so consumers only pull in the crypto libraries this build was linked against.
+if (WITH_JSON_C)
+	set(JSON_MODULE_NAME "json-c")
+else()
+	set(JSON_MODULE_NAME "jansson")
+endif()
+set(OPENSSL_MODULE_NAME "")
+set(GNUTLS_MODULE_NAME "")
+set(MBEDTLS_MODULE_NAME "")
+if (OPENSSL_FOUND)
+	set(OPENSSL_MODULE_NAME "openssl")
+endif()
+if (GNUTLS_FOUND)
+	set(GNUTLS_MODULE_NAME "gnutls")
+endif()
+if (MBEDTLS_FOUND)
+	set(MBEDTLS_MODULE_NAME "mbedcrypto")
+endif()
 
 configure_file(libjwt/libjwt.pc.in libjwt.pc @ONLY)
 install(FILES ${CMAKE_BINARY_DIR}/libjwt.pc
@@ -366,10 +398,14 @@ if (CHECK_FOUND)
 
 	# JWKS Tests
 	list (APPEND UNIT_TESTS jwt_jwks jwt_jwks_errors
-		jwt_ec jwt_rsa jwt_hs)
+		jwt_ec jwt_rsa jwt_hs jwt_jwks_pem)
 
 	# Checker and Builder
 	list (APPEND UNIT_TESTS jwt_builder jwt_checker jwt_flipflop)
+
+	# ML-DSA (FIPS 204 / RFC 9964). The test is a no-op unless the build
+	# enabled WITH_ML_DSA against a capable backend.
+	list (APPEND UNIT_TESTS jwt_mldsa)
 
 	# JWE
 	list (APPEND UNIT_TESTS jwe_foundation jwe_keys jwe_gcm jwe_cbc
@@ -400,7 +436,9 @@ if (CHECK_FOUND)
 		include(CodeCoverage)
 		append_coverage_compiler_flags()
 
-		set(COVERAGE_LCOV_INCLUDES "${CMAKE_SOURCE_DIR}/libjwt/")
+		set(COVERAGE_LCOV_INCLUDES
+			"${CMAKE_SOURCE_DIR}/libjwt/"
+			"${CMAKE_SOURCE_DIR}/tools/")
 		setup_target_for_coverage_lcov(
 			NAME check-code-coverage
 			OUTPUT "${PROJECT_NAME}-${PROJECT_VERSION}-coverage"

@@ -1,4 +1,4 @@
-/* Copyright (C) 2015-2025 maClara, LLC <info@maclara-llc.com>
+/* Copyright (C) 2015-2026 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -9,6 +9,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <limits.h>
 
 #include <jwt.h>
 
@@ -52,6 +53,14 @@ const char *jwt_alg_str(jwt_alg_t alg)
 		return "PS512";
 	case JWT_ALG_EDDSA:
 		return "EdDSA";
+#ifdef LIBJWT_HAVE_ML_DSA
+	case JWT_ALG_ML_DSA_44:
+		return "ML-DSA-44";
+	case JWT_ALG_ML_DSA_65:
+		return "ML-DSA-65";
+	case JWT_ALG_ML_DSA_87:
+		return "ML-DSA-87";
+#endif
 	default:
 		return NULL;
 	}
@@ -92,6 +101,14 @@ jwt_alg_t jwt_str_alg(const char *alg)
 		return JWT_ALG_PS512;
 	else if (!strcmp(alg, "EdDSA"))
 		return JWT_ALG_EDDSA;
+#ifdef LIBJWT_HAVE_ML_DSA
+	else if (!strcmp(alg, "ML-DSA-44"))
+		return JWT_ALG_ML_DSA_44;
+	else if (!strcmp(alg, "ML-DSA-65"))
+		return JWT_ALG_ML_DSA_65;
+	else if (!strcmp(alg, "ML-DSA-87"))
+		return JWT_ALG_ML_DSA_87;
+#endif
 
 	return JWT_ALG_INVAL;
 }
@@ -208,6 +225,16 @@ static int __check_key_bits(jwt_t *jwt)
 				key_bits);
 		break;
 
+#ifdef LIBJWT_HAVE_ML_DSA
+	case JWT_ALG_ML_DSA_44:
+	case JWT_ALG_ML_DSA_65:
+	case JWT_ALG_ML_DSA_87:
+		/* ML-DSA key strength is fixed by the variant, and the
+		 * variant is bound to the key material by the backend, so
+		 * there is no short-key risk to guard against here. */
+		return 0;
+#endif
+
 	case JWT_ALG_ES256K:
 	case JWT_ALG_ES256:
 		if (key_bits == 256)
@@ -278,7 +305,7 @@ static int sign_sha_hmac(jwt_t *jwt, char **out, unsigned int *len,
 	// LCOV_EXCL_START
 	default:
 		/* This isn't a failure in kcapi, so just error out */
-		jwt_freemem(out);
+		jwt_freemem(*out);
 		return 1;
 	// LCOV_EXCL_STOP
 	}
@@ -340,6 +367,13 @@ int jwt_sign(jwt_t *jwt, char **out, unsigned int *len, const char *str,
 
 	/* EdDSA */
 	case JWT_ALG_EDDSA:
+
+#ifdef LIBJWT_HAVE_ML_DSA
+	/* ML-DSA (FIPS 204) */
+	case JWT_ALG_ML_DSA_44:
+	case JWT_ALG_ML_DSA_65:
+	case JWT_ALG_ML_DSA_87:
+#endif
 		if (__check_key_bits(jwt))
 			return 1;
 		if (jwt_ops->sign_sha_pem(jwt, out, len, str, str_len)) {
@@ -440,6 +474,13 @@ jwt_t *jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
 
 	/* EdDSA */
 	case JWT_ALG_EDDSA:
+
+#ifdef LIBJWT_HAVE_ML_DSA
+	/* ML-DSA (FIPS 204) */
+	case JWT_ALG_ML_DSA_44:
+	case JWT_ALG_ML_DSA_65:
+	case JWT_ALG_ML_DSA_87:
+#endif
 		if (__check_key_bits(jwt))
 			break;
 
@@ -614,7 +655,7 @@ base64_decode(const char *in, unsigned int inlen, unsigned char *out)
 			break;
 		case 1:
 			out[j++] |= (c >> 4) & 0x3;
-			out[j] = (c & 0xF) << 4; 
+			out[j] = (c & 0xF) << 4;
 			break;
 		case 2:
 			out[j++] |= (c >> 2) & 0xF;
@@ -668,7 +709,16 @@ void *jwt_base64uri_decode(const char *src, int *ret_len)
 		return NULL; // LCOV_EXCL_LINE
 
 	for (i = 0; i < len; i++) {
-		switch (src[i]) {
+		char c = src[i];
+
+		/* @rfc{7515,2}, @rfc{7517,3} JWS/JWE token segments and JWK member
+		 * values are unpadded base64url: the alphabet is exactly
+		 * [A-Za-z0-9_-]. Reject the standard-base64 characters '+' and '/'
+		 * and any literal padding '=' (which would otherwise truncate the
+		 * input silently), so a value cannot be re-spelled in the standard
+		 * alphabet yet decode to the same bytes. '-' and '_' are translated
+		 * to their standard-alphabet form for the decoder below. */
+		switch (c) {
 		case '-':
 			new[i] = '+';
 			break;
@@ -676,7 +726,12 @@ void *jwt_base64uri_decode(const char *src, int *ret_len)
 			new[i] = '/';
 			break;
 		default:
-			new[i] = src[i];
+			if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+			      (c >= '0' && c <= '9'))) {
+				jwt_freemem(new);
+				return NULL;
+			}
+			new[i] = c;
 		}
 	}
 
@@ -708,6 +763,13 @@ int jwt_base64uri_encode(char **_dst, const char *plain, int plain_len)
 {
 	int len, i;
 	char *dst;
+
+	/* Guard the size math: BASE64_ENCODE_OUT_SIZE computes ((s+2)/3)*4+1,
+	 * which overflows the int result (and so under-allocates dst) well below
+	 * INT_MAX, and plain_len can also arrive negative from a truncated size_t
+	 * cast at a caller. Reject anything that would not encode within INT_MAX. */
+	if (plain_len < 0 || (unsigned int)plain_len > (INT_MAX - 1) / 4 * 3 - 2)
+		return -1; // LCOV_EXCL_LINE
 
 	len = BASE64_ENCODE_OUT_SIZE(plain_len);
 	dst = jwt_malloc(len + 1);

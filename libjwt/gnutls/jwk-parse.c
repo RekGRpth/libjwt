@@ -1,4 +1,4 @@
-/* Copyright (C) 2015-2025 maClara, LLC <info@maclara-llc.com>
+/* Copyright (C) 2015-2026 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -17,8 +17,6 @@
 
 #include "jwt-private.h"
 #include "jwt-gnutls.h"
-
-#if JWT_GNUTLS_NATIVE_JWE
 
 /* base64url-decode a JWK string member into a gnutls_datum_t. The datum's
  * data is a jwt_malloc'd buffer the caller frees with jwt_freemem(d->data). */
@@ -527,7 +525,7 @@ void gnutls_process_item_free(jwk_item_t *item)
 	}
 
 	if (item->pem) {
-		OPENSSL_cleanse(item->pem, strlen(item->pem));
+		jwt_cleanse(item->pem, strlen(item->pem));
 		jwt_freemem(item->pem);
 	}
 
@@ -535,5 +533,3 @@ void gnutls_process_item_free(jwk_item_t *item)
 	item->provider_data = NULL;
 	item->provider = JWT_CRYPTO_OPS_NONE;
 }
-
-#endif /* JWT_GNUTLS_NATIVE_JWE */

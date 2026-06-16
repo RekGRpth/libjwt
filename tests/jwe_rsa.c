@@ -8,6 +8,14 @@
 
 static const char PT[] = "{\"sub\":\"1234567890\",\"name\":\"Jane Doe\"}";
 
+/* GnuTLS/nettle has no SHA-1 RSA-OAEP, and the GnuTLS backend does not fall
+ * back to OpenSSL, so it never supports plain RSA-OAEP (JWE_ALG_RSA_OAEP).
+ * OpenSSL and MbedTLS do it natively. */
+static int rsa_oaep_sha1_supported(jwt_crypto_provider_t type)
+{
+	return type != JWT_CRYPTO_OPS_GNUTLS;
+}
+
 static void roundtrip(jwe_key_alg_t alg, jwe_enc_t enc)
 {
 	jwe_builder_auto_t *builder = NULL;
@@ -40,6 +48,8 @@ static void roundtrip(jwe_key_alg_t alg, jwe_enc_t enc)
 START_TEST(rt_oaep_gcm)
 {
 	SET_OPS();
+	if (!rsa_oaep_sha1_supported(jwt_test_ops[_i].type))
+		return;
 	roundtrip(JWE_ALG_RSA_OAEP, JWE_ENC_A256GCM);
 }
 END_TEST
