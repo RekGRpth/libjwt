@@ -36,122 +36,142 @@ jobs:
         cmake -B build -DWITH_LIBCURL=YES
         cmake --build build -- all check
 
+  # Vendor compatibility matrix: does libjwt build + pass its tests against the
+  # OpenSSL and JSON libraries that real distros actually ship? Each distro is
+  # built twice - once with jansson, once with json-c - so both JSON backends are
+  # exercised across their shipped vendor versions (json-c 0.15/0.17/0.18, etc.).
+  #
+  # GnuTLS is OFF on every row. Every distro currently ships a GnuTLS stack
+  # (<= 3.8.12) that segfaults loading Ed448 keys and fails X25519/X448 ECDH-ES
+  # in libjwt (the NIST P-curves are fine). A GnuTLS 3.8.13 stack is correct -
+  # verified on debian:forky (apt GnuTLS 3.8.13 + nettle 3.10.2 + p11-kit passes
+  # all of them), so it is the <= 3.8.12 -> 3.8.13 GnuTLS upgrade, NOT p11-kit.
+  # No stable distro ships 3.8.13 yet; native GnuTLS is covered by
+  # build-linux-combos (image's 3.8.13). Re-enable per distro once it ships >= 3.8.13.
+  #
+  # Debian has no hosted runner, so stable/oldstable run as containers.
   build-linux:
-    runs-on: ubuntu-latest
+    name: "Compat / ${{ matrix.distro }} / ${{ matrix.json }}"
+    runs-on: ${{ matrix.runs-on }}
+    container: ${{ matrix.container }}
+    # ubuntu-26.04 is still a public-preview runner image; don't fail all of CI
+    # if it hiccups.
+    continue-on-error: ${{ matrix.experimental || false }}
+    strategy:
+      fail-fast: false
+      matrix:
+        json: [ jansson, json-c ]
+        distro: [ ubuntu-22.04, ubuntu-24.04, ubuntu-26.04, debian-stable, debian-oldstable ]
+        exclude:
+          # Ubuntu 22.04 (jammy) ships json-c 0.15; libjwt requires json-c >= 0.16
+          # (CMakeLists.txt), so that one combination can't configure. jammy still
+          # builds with jansson. (json-c: noble 0.17, bookworm 0.16, trixie/
+          # resolute 0.18 all clear the floor.)
+          - { distro: ubuntu-22.04, json: json-c }
+        # Attach per-distro runner/container (and the preview flag) to each JSON
+        # variant of each distro -> 5 distros x 2 backends - 1 exclude = 9 jobs.
+        include:
+          - { distro: ubuntu-22.04,     runs-on: "ubuntu-22.04",  container: "" }
+          - { distro: ubuntu-24.04,     runs-on: "ubuntu-24.04",  container: "" }
+          - { distro: ubuntu-26.04,     runs-on: "ubuntu-26.04",  container: "", experimental: true }
+          - { distro: debian-stable,    runs-on: "ubuntu-latest", container: "debian:stable" }
+          - { distro: debian-oldstable, runs-on: "ubuntu-latest", container: "debian:oldstable" }
     steps:
-    - uses: actions/checkout@v5
-    - uses: ConorMacBride/install-package@v1
-      with:
-        apt: gnutls-dev libssl-dev libjansson-dev pkg-config check lcov valgrind libcurl4-openssl-dev bats jq
+      # Minimal Debian containers need git before actions/checkout can clone.
+      # Hosted ubuntu runners already have it (and aren't containers).
+      - name: Bootstrap container
+        if: ${{ matrix.container != '' }}
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git ca-certificates sudo
 
-    - name: Build, Test, and Coverage
-      run: |
-        cmake -B build -DENABLE_COVERAGE=YES -DWITH_LIBCURL=YES
-        cmake --build build -- all check-code-coverage
+      - uses: actions/checkout@v5
 
-    - uses: codecov/codecov-action@v5.1.2
-      with:
-        token: ${{ secrets.CODECOV_TOKEN }}
-        files: ${{github.workspace}}/build/check-code-coverage.info
-        disable_search: true
-        verbose: true
+      - name: Install dependencies
+        run: |
+          PKGS="build-essential cmake pkg-config libssl-dev check bats jq"
+          if [ "${{ matrix.json }}" = "json-c" ]; then
+            PKGS="$PKGS libjson-c-dev"
+          else
+            PKGS="$PKGS libjansson-dev"
+          fi
+          if [ "$(id -u)" != "0" ]; then SUDO=sudo; else SUDO=; fi
+          $SUDO apt-get update
+          $SUDO apt-get install -y --no-install-recommends $PKGS
 
-    - name: Memcheck
-      working-directory: ${{github.workspace}}/build
-      run: ctest -T memcheck
+      - name: Build and Test
+        run: |
+          JSON_FLAG=""
+          [ "${{ matrix.json }}" = "json-c" ] && JSON_FLAG="-DWITH_JSON_C=YES"
+          cmake -B build \
+            -DWITH_OPENSSL=ON -DWITH_GNUTLS=OFF -DWITH_MBEDTLS=OFF \
+            $JSON_FLAG
+          cmake --build build -- all check
 
-  # OpenSSL is now an optional backend, so the library must build and pass the
-  # test suite with any non-empty subset of {OpenSSL, GnuTLS, MbedTLS}. Exercise
-  # all seven combinations. forky provides all three (GnuTLS >= 3.8.4 and
-  # MbedTLS 3.x); GnuTLS >= 3.8.4 is required for the OpenSSL-less GnuTLS combos
-  # (older GnuTLS has no native JWK/JWE path and relies on the OpenSSL fallback).
+  # OpenSSL is an optional backend, so the library must build and pass the test
+  # suite with any non-empty subset of {OpenSSL, GnuTLS, MbedTLS}. Exercise the
+  # combinations in the custom CI base image (debian:forky + GnuTLS built
+  # --with-leancrypto + latest MbedTLS 3.6.x LTS) so every backend - including
+  # the GnuTLS ML-DSA success path - is real. See .github/docker/.
   build-linux-combos:
+    name: "Combo / ${{ matrix.name }}"
     runs-on: ubuntu-latest
     container:
-      image: debian:forky
+      image: ghcr.io/benmcollins/libjwt/gnutls-leancrypto-mbedtls:latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { name: "MbedTLS",                flags: "-DWITH_OPENSSL=OFF -DWITH_GNUTLS=OFF -DWITH_MBEDTLS=ON" }
-          - { name: "GnuTLS",                 flags: "-DWITH_OPENSSL=OFF -DWITH_GNUTLS=ON -DWITH_MBEDTLS=OFF" }
-          - { name: "OpenSSL",                flags: "-DWITH_OPENSSL=ON -DWITH_GNUTLS=OFF -DWITH_MBEDTLS=OFF" }
-          - { name: "MbedTLS+GnuTLS",         flags: "-DWITH_OPENSSL=OFF -DWITH_GNUTLS=ON -DWITH_MBEDTLS=ON" }
-          - { name: "MbedTLS+OpenSSL",        flags: "-DWITH_OPENSSL=ON -DWITH_GNUTLS=OFF -DWITH_MBEDTLS=ON" }
-          - { name: "GnuTLS+OpenSSL",         flags: "-DWITH_OPENSSL=ON -DWITH_GNUTLS=ON -DWITH_MBEDTLS=OFF" }
-          - { name: "MbedTLS+GnuTLS+OpenSSL", flags: "-DWITH_OPENSSL=ON -DWITH_GNUTLS=ON -DWITH_MBEDTLS=ON" }
+          - { name: "MbedTLS",         flags: "-DWITH_OPENSSL=OFF -DWITH_GNUTLS=OFF -DWITH_MBEDTLS=ON" }
+          - { name: "GnuTLS",          flags: "-DWITH_OPENSSL=OFF -DWITH_GNUTLS=ON -DWITH_MBEDTLS=OFF" }
+          - { name: "OpenSSL",         flags: "-DWITH_OPENSSL=ON -DWITH_GNUTLS=OFF -DWITH_MBEDTLS=OFF" }
+          - { name: "MbedTLS+GnuTLS",  flags: "-DWITH_OPENSSL=OFF -DWITH_GNUTLS=ON -DWITH_MBEDTLS=ON" }
+          - { name: "MbedTLS+OpenSSL", flags: "-DWITH_OPENSSL=ON -DWITH_GNUTLS=OFF -DWITH_MBEDTLS=ON" }
+          - { name: "GnuTLS+OpenSSL",  flags: "-DWITH_OPENSSL=ON -DWITH_GNUTLS=ON -DWITH_MBEDTLS=OFF" }
+          # The comprehensive row: all three backends + experimental ML-DSA. This
+          # is the ONLY row that collects coverage (-> Codecov) and runs memcheck.
+          # On this image GnuTLS is built --with-leancrypto, so WITH_ML_DSA=ON
+          # exercises the ML-DSA SUCCESS path on both OpenSSL and GnuTLS (and the
+          # rejection path on MbedTLS) - those lines are run, not just compiled,
+          # so they count toward Codecov instead of dragging codecov/patch down.
+          - { name: "all", flags: "-DWITH_OPENSSL=ON -DWITH_GNUTLS=ON -DWITH_MBEDTLS=ON -DWITH_ML_DSA=ON", coverage: true }
     steps:
     - uses: actions/checkout@v5
-    - name: Install dependencies
-      run: |
-        apt-get update
-        apt-get install -y --no-install-recommends \
-          gcc cmake pkg-config make git curl \
-          libssl-dev gnutls-dev libmbedtls-dev libjansson-dev \
-          libcurl4-openssl-dev check bats jq ca-certificates
-
-    - name: "Build (${{ matrix.name }})"
-      run: |
-        cmake -B build ${{ matrix.flags }} -DWITH_LIBCURL=YES
-        cmake --build build -- all
-
-    - name: "Test (${{ matrix.name }})"
-      working-directory: ${{github.workspace}}/build
-      run: ctest --output-on-failure
-
-  build-linux-json-c:
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v5
-    - uses: ConorMacBride/install-package@v1
-      with:
-        apt: gnutls-dev libssl-dev libjson-c-dev pkg-config check libcurl4-openssl-dev bats jq
-
-    - name: Build and Test with json-c
-      run: |
-        cmake -B build -DWITH_JSON_C=YES -DWITH_LIBCURL=YES
-        cmake --build build -- all check
-
-  # MbedTLS requires >= 3.6.0, which Ubuntu does not package (it ships 2.28).
-  # Debian forky provides mbedtls 3.6.x, so run the MbedTLS matrix in a forky
-  # container. This validates the native MbedTLS JWS/JWK/JWE backend and the
-  # cross-backend interop tests (which loop over every compiled provider).
-  build-linux-mbedtls:
-    runs-on: ubuntu-latest
-    container:
-      image: debian:forky
-    steps:
-    - uses: actions/checkout@v5
-    - name: Install dependencies
-      run: |
-        apt-get update
-        apt-get install -y --no-install-recommends \
-          gcc cmake pkg-config make git curl \
-          libssl-dev gnutls-dev libmbedtls-dev libjansson-dev \
-          libcurl4-openssl-dev check bats jq ca-certificates lcov
 
     # The repo is checked out as a different owner than the container user;
-    # mark it safe so the Codecov action's git calls work.
+    # mark it safe so the coverage/Codecov git calls work.
     - name: Mark workspace safe for git
       run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-    # forky ships GnuTLS >= 3.8.4 and MbedTLS 3.x, so this job exercises the
-    # native MbedTLS backend AND the native GnuTLS JWE path (RSA-OAEP-256,
-    # ECDH-ES, JWK parsing) that Ubuntu's older GnuTLS cannot. Coverage is
-    # collected here too and merged by Codecov with the OpenSSL/GnuTLS-fallback
-    # report from build-linux, so the version-gated native lines are counted.
-    - name: Build, Test, and Coverage (OpenSSL + GnuTLS + MbedTLS)
+    - name: "Build (${{ matrix.name }})"
       run: |
-        cmake -B build -DWITH_MBEDTLS=YES -DWITH_LIBCURL=YES \
-              -DENABLE_COVERAGE=YES
+        cmake -B build ${{ matrix.flags }} -DWITH_LIBCURL=YES \
+          ${{ matrix.coverage && '-DENABLE_COVERAGE=YES' || '' }}
+        cmake --build build -- all
+
+    - name: "Test (${{ matrix.name }})"
+      if: ${{ !matrix.coverage }}
+      working-directory: ${{ github.workspace }}/build
+      run: ctest --output-on-failure
+
+    # ---- comprehensive "all" row only: coverage + memcheck + upload ----
+    - name: "Coverage (${{ matrix.name }})"
+      if: ${{ matrix.coverage }}
+      run: |
         # The genhtml step of check-code-coverage exits non-zero, but the lcov
         # capture (check-code-coverage.info) is produced and is what we upload.
-        cmake --build build -- all check-code-coverage || true
+        cmake --build build -- check-code-coverage || true
         test -f build/check-code-coverage.info
 
+    - name: "Memcheck (${{ matrix.name }})"
+      if: ${{ matrix.coverage }}
+      working-directory: ${{ github.workspace }}/build
+      run: ctest -T memcheck
+
     - uses: codecov/codecov-action@v5.1.2
+      if: ${{ matrix.coverage }}
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
-        files: ${{github.workspace}}/build/check-code-coverage.info
+        files: ${{ github.workspace }}/build/check-code-coverage.info
         disable_search: true
         verbose: true
