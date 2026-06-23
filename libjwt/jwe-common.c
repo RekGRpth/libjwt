@@ -167,7 +167,8 @@ static int jwe_header_name_reserved(const char *key)
 {
 	return !strcmp(key, "alg") || !strcmp(key, "enc") ||
 	       !strcmp(key, "epk") || !strcmp(key, "apu") ||
-	       !strcmp(key, "apv");
+	       !strcmp(key, "apv") || !strcmp(key, "iv") ||
+	       !strcmp(key, "tag");
 }
 
 /* @rfc{7518,4.6.2} Encode apu/apv as base64url into recipient @r. NULL/0 leaves
@@ -483,6 +484,18 @@ oom:
 	return 1;
 	// LCOV_EXCL_STOP
 }
+
+/* @rfc{7518,4.8} Set the PBES2 PBKDF2 iteration count (the "p2c" header). 0
+ * selects the library default. Only affects PBES2-* key management algorithms. */
+int FUNC(setpbes2)(jwe_common_t *__cmd, unsigned int p2c)
+{
+	if (__cmd == NULL)
+		return 1;
+
+	__cmd->c.pbes2_p2c = p2c;
+
+	return 0;
+}
 #endif
 
 #ifdef JWE_BUILDER
@@ -619,6 +632,11 @@ static int FUNC(wrap_recipient)(jwe_common_t *__cmd, struct jwe_recipient *r,
 	const unsigned char *k;
 	int ret;
 
+	/* The builder is reusable: drop any Encrypted Key produced by a previous
+	 * jwe_builder_generate() before wrapping this recipient again. */
+	jwt_freemem(r->enckey);
+	r->enckey_len = 0;
+
 	if (jwt_json_obj_set(kmhdr, "alg",
 			     jwt_json_create_str(jwe_alg_str(r->key_alg))))
 		return 1; // LCOV_EXCL_LINE
@@ -677,6 +695,29 @@ static int FUNC(wrap_recipient)(jwe_common_t *__cmd, struct jwe_recipient *r,
 			return 1; // LCOV_EXCL_LINE
 		memcpy(*cek_out, k, klen);
 		*cek_out_len = klen;
+		return 0;
+	}
+
+	/* @rfc{7518,4.7} AES-GCM key wrap: GCM-encrypt the CEK under the oct KEK,
+	 * writing the per-recipient "iv"/"tag" into the key-management header. */
+	if (jwe_alg_is_gcmkw(r->key_alg)) {
+		if (jwe_gcmkw_wrap(r->key_alg, r->key, cek, cek_len, kmhdr,
+				   &r->enckey, &r->enckey_len)) {
+			jwt_write_error(__cmd, "AES-GCM key wrap failed");
+			return 1;
+		}
+		return 0;
+	}
+
+	/* @rfc{7518,4.8} PBES2: PBKDF2-derive a KEK from the password and AES-KW
+	 * wrap the CEK, writing "p2s"/"p2c" into the key-management header. */
+	if (jwe_alg_is_pbes2(r->key_alg)) {
+		if (jwe_pbes2_wrap(r->key_alg, r->key, cek, cek_len,
+				   __cmd->c.pbes2_p2c, kmhdr, &r->enckey,
+				   &r->enckey_len)) {
+			jwt_write_error(__cmd, "PBES2 key wrap failed");
+			return 1;
+		}
 		return 0;
 	}
 
@@ -1098,6 +1139,67 @@ static unsigned char *FUNC(recover_and_decrypt)(jwe_common_t *__cmd,
 		if (cek == NULL)
 			goto oom; // LCOV_EXCL_LINE
 		memcpy(cek, k, cek_len);
+	} else if (jwe_alg_is_gcmkw(alg)) {
+		/* @rfc{7518,4.7} The Encrypted Key is the GCM-wrapped CEK; the
+		 * "iv"/"tag" needed to unwrap it live in the effective header. */
+		size_t need = jwe_enc_cek_len(enc);
+		int bad = 0;
+
+		if (!have_ek) {
+			jwt_write_error(__cmd,
+				"AES-GCM key wrap requires an Encrypted Key");
+			return NULL;
+		}
+
+		enckey = jwt_base64uri_decode(ek_b64, &ek_len);
+		if (enckey == NULL || ek_len <= 0)
+			bad = 1;
+		else if (jwe_gcmkw_unwrap(alg, recip->key, eff_hdr, enckey,
+					  ek_len, &cek, &cek_len))
+			bad = 1;
+		else if (cek_len != need)
+			bad = 1; // LCOV_EXCL_LINE
+
+		/* @rfc{7516,11.5} On any failure (incl. a bad key tag) substitute
+		 * a random CEK so the content AEAD fails uniformly. */
+		if (bad) {
+			jwt_scrub_and_free(cek, cek_len);
+			cek = NULL;
+			cek_len = 0;
+			if (jwe_generate_cek(enc, &cek, &cek_len))
+				goto oom; // LCOV_EXCL_LINE
+		}
+	} else if (jwe_alg_is_pbes2(alg)) {
+		/* @rfc{7518,4.8} PBKDF2-derive the KEK (p2s/p2c from the effective
+		 * header; the cap is enforced inside jwe_pbes2_unwrap) and AES-KW
+		 * unwrap the Encrypted Key. */
+		size_t need = jwe_enc_cek_len(enc);
+		int bad = 0;
+
+		if (!have_ek) {
+			jwt_write_error(__cmd,
+				"PBES2 requires an Encrypted Key");
+			return NULL;
+		}
+
+		enckey = jwt_base64uri_decode(ek_b64, &ek_len);
+		if (enckey == NULL || ek_len <= 0)
+			bad = 1;
+		else if (jwe_pbes2_unwrap(alg, recip->key, eff_hdr, enckey,
+					  ek_len, &cek, &cek_len))
+			bad = 1;
+		else if (cek_len != need)
+			bad = 1; // LCOV_EXCL_LINE
+
+		/* @rfc{7516,11.5} Bad password / over-cap p2c / short salt: random
+		 * CEK so the content AEAD fails uniformly. */
+		if (bad) {
+			jwt_scrub_and_free(cek, cek_len);
+			cek = NULL;
+			cek_len = 0;
+			if (jwe_generate_cek(enc, &cek, &cek_len))
+				goto oom; // LCOV_EXCL_LINE
+		}
 	} else {
 		/* A*KW / RSA-OAEP: the Encrypted Key carries the CEK. */
 		size_t need = jwe_enc_cek_len(enc);

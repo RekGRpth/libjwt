@@ -44,6 +44,14 @@
 JWT_NO_EXPORT
 extern struct jwt_crypto_ops *jwt_ops;
 
+/* The crypto ops to use for operations on @item. A jwk_item is bound to the
+ * backend that parsed it (item->provider); route key operations through that
+ * backend regardless of the active jwt_ops. Cross-compatible keys (oct, i.e.
+ * JWT_CRYPTO_OPS_ANY) and a NULL/error item use the active ops. Returns NULL
+ * only if the origin backend is not compiled into this build. */
+JWT_NO_EXPORT
+struct jwt_crypto_ops *jwt_item_ops(const jwk_item_t *item);
+
 /* This can be used on anything with an error and error_msg field */
 #define jwt_write_error(__obj, __fmt, __args...)	\
 ({							\
@@ -89,6 +97,61 @@ struct jwt_common {
 	 * Both are in seconds. */
 	time_t exp;
 	time_t nbf;
+
+	/* --- @rfc{7515,7.2} JSON Serialization (multi-signature) ---
+	 * The single-signature Compact path uses .alg/.key above and an empty
+	 * list, keeping its behavior byte-identical. The signature list is
+	 * materialized by jwt_builder_setkey()/add_signature() (builder) or the
+	 * JSON parse (checker); it is iterated only for the JSON serializations. */
+	jwt_serialization_t format;	/* builder: emit form; default COMPACT (0) */
+	ll_t signatures;		/* list of struct jwt_signature		*/
+	int n_signatures;
+
+	/* checker: a borrowed multi-key set (JWKS) and the multi-signature
+	 * verification policy. NULL keyring => the single .key above is used. */
+	const jwk_set_t *keyring;
+	jwt_verify_policy_t policy;
+	unsigned int last_sig_count;	/* signatures in the last JSON token	*/
+
+	/* --- @rfc{7797} Unencoded payload / detached payload ---
+	 * An opaque payload set via jwt_builder_setpayload() (mutually exclusive
+	 * with JSON claims); signed as-is. @b64 (default 1) selects base64url vs
+	 * the RFC 7797 unencoded ("b64":false) signing input; @detached omits the
+	 * payload from the output (supplied out-of-band on verify). */
+	unsigned char *payload_raw;
+	size_t payload_raw_len;
+	int b64;
+	int detached;
+
+	/* --- @rfc{8725} Checker ergonomics ---
+	 * @expected_typ: if set, the token's "typ" must match it (case-insensitive,
+	 * optional "application/" prefix). @alg_allowlist: if non-empty, the token's
+	 * "alg" must be one of these (checked before the signature). */
+	char *expected_typ;
+	jwt_alg_t *alg_allowlist;
+	size_t n_alg_allowlist;
+
+	/* --- @rfc{9068} Required-claims-present (checker) ---
+	 * @require: a copied array of claim names (e.g. "iss","exp","jti") that
+	 * must be PRESENT in the token, independent of any value match. */
+	char **require;
+	size_t n_require;
+
+	/* --- @rfc{7515,4.1.3} Embedded-JWK header verify (checker) ---
+	 * When @embedded_jwk is set, the verification key is taken from the
+	 * token's protected-header "jwk" — but only after the key is CONFIRMED
+	 * against either @embedded_jkt (a pinned thumbprint) or @embedded_keyring
+	 * (a borrowed allowlist), using @embedded_alg as the thumbprint hash.
+	 * Exactly one of @embedded_jkt / @embedded_keyring is set. The header key
+	 * is attacker-supplied, so it is never trusted without this confirmation. */
+	int embedded_jwk;
+	jwk_thumbprint_alg_t embedded_alg;
+	char *embedded_jkt;
+	const jwk_set_t *embedded_keyring;
+	/* The confirmed header key is parsed into a keyring this checker OWNS;
+	 * it must outlive the verify (jwt_checker_sig_key() borrows it), so it is
+	 * reset at the start of each verify and freed at checker free. */
+	jwk_set_t *embedded_owned;
 };
 
 struct jwt_builder {
@@ -101,6 +164,24 @@ struct jwt_checker {
 	struct jwt_common c;
 	int error;
 	char error_msg[JWT_ERR_LEN];
+};
+
+/* @rfc{7515,7.2.1} One JWS signature: its own "alg" and PROTECTED header (the
+ * exact bytes it signs over), an optional per-signature UNPROTECTED "header"
+ * (JSON serializations only), the signing key (builder) or matched key
+ * (checker), and the verbatim base64url protected header + signature. Linked
+ * via ll.h: a Compact/Flattened JWS is a one-element list, General is N.
+ * Owned by the enclosing struct jwt_common. */
+struct jwt_signature {
+	ll_t node;
+	jwt_alg_t alg;		/* this signature's algorithm			*/
+	const jwk_item_t *key;	/* builder: signing key; checker: matched key	*/
+	jwt_json_t *protected;	/* per-signature protected header (builder)	*/
+	jwt_json_t *header;	/* optional per-signature unprotected header	*/
+	char *protected_b64;	/* VERBATIM base64url(protected); the signing	*/
+				/* input reuses these bytes, never re-encoded	*/
+	char *sig_b64;		/* base64url(signature)				*/
+	int verified;		/* checker: 1 if this signature verified	*/
 };
 
 /******************************/
@@ -148,6 +229,10 @@ struct jwe_common {
 	/* @rfc{7516,4.1.4} Serialization to emit (builder). */
 	jwe_serialization_t format;
 
+	/* @rfc{7518,4.8} PBES2 iteration count for the builder; 0 = the library
+	 * default. Set via jwe_builder_setpbes2(). */
+	unsigned int pbes2_p2c;
+
 	/* @rfc{7516,5.1} step 14 The application-supplied JWE AAD (the "aad"
 	 * member of the JSON serializations). @aad_b64 is its base64url form,
 	 * which is also what is concatenated into the AEAD AAD. */
@@ -194,16 +279,38 @@ struct jwt {
 	jwt_alg_t alg;
 	int error;
 	char error_msg[JWT_ERR_LEN];
+
+	/* @rfc{7797} An opaque payload (instead of JSON @claims), and the b64 /
+	 * detached flags, threaded from the builder/checker into encode/verify.
+	 * @payload_raw is borrowed (owned by jwt_common or the caller). */
+	const unsigned char *payload_raw;
+	size_t payload_raw_len;
+	int b64;
+	int detached;
+
 	union {
 		struct jwt_checker *checker;
 		struct jwt_builder *builder;
 	};
 };
 
+/* @rfc{7517} Remote-fetch cache state for a JWKS URL source (issue #313, only
+ * meaningful with libcurl). Lives on the jwk_set; NULL for a non-URL set. */
+struct jwks_url_cache {
+	char *url;		/* The source URL (http/https)			*/
+	char *etag;		/* Last ETag, for conditional GET (or NULL)	*/
+	int verify;		/* TLS verification (peer+host)			*/
+	int ttl;		/* Fallback cache lifetime if no max-age (s)	*/
+	int cooldown;		/* Min seconds between kid-miss refreshes	*/
+	time_t expiry;		/* Cache valid until this wall-clock time	*/
+	time_t last_fetch;	/* Time of the last network fetch (cooldown)	*/
+};
+
 struct jwk_set {
 	ll_t head;
 	int error;
 	char error_msg[JWT_ERR_LEN];
+	struct jwks_url_cache *cache;	/* @rfc{7517} URL cache, or NULL	*/
 };
 
 /**
@@ -217,6 +324,13 @@ struct jwk_set {
  * string of the key. The underlying crypto algorithm may or may not support
  * this. It's provided as a convenience.
  */
+
+/* @rfc{7517,4.7} One decoded ("x5c") certificate: the raw DER octets. */
+struct jwk_cert {
+	unsigned char *der;
+	size_t len;
+};
+
 struct jwk_item {
 	ll_t node;
 	char *pem;		/**< If not NULL, contains PEM string of this key	*/
@@ -238,6 +352,8 @@ struct jwk_item {
 	jwk_key_op_t key_ops;	/**< @rfc{7517,4.3} Key operations supported		*/
 	jwt_alg_t alg;		/**< @rfc{7517,4.4} JWA Algorithm supported		*/
 	char *kid;		/**< @rfc{7517,4.5} Key ID				*/
+	struct jwk_cert *x5c;	/**< @rfc{7517,4.7} decoded DER cert chain (or NULL)	*/
+	size_t x5c_count;	/**< Number of certificates in @ref jwk_item.x5c	*/
 	jwt_json_t *json;	/**< The jwt_json_t for this key			*/
 };
 
@@ -300,6 +416,32 @@ struct jwt_crypto_ops {
 	 * Implemented natively by each backend; NULL if a backend cannot convert
 	 * native keys at all. */
 	int (*key2jwk_params)(const char *key, size_t len, jwk_export_t *out);
+
+	/* Generate a fresh ASYMMETRIC key (EC/RSA/RSA-PSS/OKP/AKP) of type @kty
+	 * with the geometry in @param and the discriminator @alg, emitting an
+	 * unencrypted PKCS#8 private-key PEM into *@pem_out (jwt_malloc'd; the
+	 * common jwks_generate() scrubs+frees it and runs it through jwt_key2jwk).
+	 * Returns 0 on success, non-zero on an unsupported type/param/curve or a
+	 * runtime-incapable backend. NULL if the backend cannot generate keys.
+	 * "oct" is generated in common code (jwt_ops->rng), not here. */
+	int (*generate_pem)(jwk_key_type_t kty, const char *param, jwt_alg_t alg,
+			    char **pem_out, size_t *pem_len);
+
+	/* One-shot SHA-2 digest. @sha_bits selects the hash (256/384/512).
+	 * Writes the raw digest into @out (the caller provides a buffer of at
+	 * least 64 bytes) and sets *@out_len. Returns 0 on success. Backed by
+	 * each backend's native digest. Used by the @rfc{7638} JWK thumbprint;
+	 * every backend provides it (it is not gated by jwe_implemented). */
+	int (*sha)(int sha_bits, const unsigned char *in, size_t in_len,
+		   unsigned char *out, unsigned int *out_len);
+
+	/* @rfc{8018} PBKDF2-HMAC-SHA{256,384,512}: derive @dk_len octets into
+	 * @out from the password @pw and @salt over @iter iterations. Used by the
+	 * PBES2 (RFC 7518 4.8) JWE key-management algorithms. Returns 0 on
+	 * success. NULL on a backend that cannot derive (PBES2 then fails cleanly). */
+	int (*pbkdf2)(int sha_bits, const unsigned char *pw, size_t pw_len,
+		      const unsigned char *salt, size_t salt_len,
+		      unsigned int iter, unsigned char *out, size_t dk_len);
 
 	/* JWE (RFC 7516/7518). A backend may implement JWE crypto ops even if
 	 * it does not parse JWKs (JWK parsing always falls back to OpenSSL).
@@ -447,6 +589,18 @@ JWT_NO_EXPORT
 int jwt_key2jwk(const char *key, size_t len, unsigned int flags,
 		jwt_json_t *out_array);
 
+/* @rfc{7638} Stamp the thumbprint "kid" on @jwk when JWK_KEY_GEN_KID is in
+ * @flags (used by jwt_key2jwk and the oct path of jwks_generate). */
+JWT_NO_EXPORT
+void jwt_gen_kid(jwt_json_t *jwk, jwk_key_type_t kty, unsigned int flags);
+
+/* Core @rfc{7638} JWK thumbprint: base64url(SHA-@bits) over the canonical JWK
+ * assembled from @jwk's required members for key type @kty. @bits is 256/384/512.
+ * Returns a malloc'd string (caller frees) or NULL. Shared by the public
+ * jwks_item_thumbprint() and the key2jwk "kid" generator. */
+JWT_NO_EXPORT
+char *jwt_jwk_thumbprint(const jwt_json_t *jwk, jwk_key_type_t kty, int bits);
+
 static inline void jwt_freememp(char **mem) {
 	jwt_freemem(*mem);
 }
@@ -469,6 +623,16 @@ JWT_NO_EXPORT
 int jwt_base64uri_encode(char **_dst, const char *plain, int plain_len);
 JWT_NO_EXPORT
 void *jwt_base64uri_decode(const char *src, int *ret_len);
+
+/* Standard (non-URL) base64, used for the @rfc{7517,4.7} "x5c" certificate
+ * chain. @out must hold at least 4*((inlen+2)/3) (encode) or 3*(inlen/4)
+ * (decode) octets; both return the number of octets written. */
+JWT_NO_EXPORT
+unsigned int base64_encode(const unsigned char *in, unsigned int inlen,
+			   char *out);
+JWT_NO_EXPORT
+unsigned int base64_decode(const char *in, unsigned int inlen,
+			   unsigned char *out);
 
 JWT_NO_EXPORT
 jwt_t *jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
@@ -499,6 +663,54 @@ char *jwt_encode_str(jwt_t *jwt);
 
 JWT_NO_EXPORT
 int jwt_head_setup(jwt_t *jwt);
+
+/* @rfc{7515,7.2} JWS JSON Serialization (multi-signature) helpers.
+ *
+ * The jwt_signature list helpers mirror the jwe_recipient ones: a Compact/
+ * Flattened JWS is a one-element list, General is N. Owned by jwt_common. */
+JWT_NO_EXPORT
+struct jwt_signature *jwt_signature_first(struct jwt_common *cmd);
+JWT_NO_EXPORT
+struct jwt_signature *jwt_signature_append(struct jwt_common *cmd);
+JWT_NO_EXPORT
+struct jwt_signature *jwt_signature_first_or_add(struct jwt_common *cmd);
+JWT_NO_EXPORT
+void jwt_signature_free(struct jwt_signature *s);
+
+/* Builder: serialize @cmd's signatures + finalized claims (@jwt->claims) into a
+ * JWS JSON Serialization (Flattened or General). Returns a malloc'd string. */
+JWT_NO_EXPORT
+char *jwt_encode_json(jwt_t *jwt, struct jwt_common *cmd);
+
+/* @rfc{7797} The payload as it appears after the first '.': raw bytes or
+ * serialized claims, base64url-encoded unless jwt->b64 is false. Malloc'd,
+ * NUL-terminated, binary-safe via @out_len. 0 on success. */
+JWT_NO_EXPORT
+int jwt_build_payload_part(jwt_t *jwt, char **out, size_t *out_len);
+
+/* @rfc{7797,6} Inject "b64":false + "b64" in "crit" into jwt->headers (for an
+ * unencoded payload). 0 on success. */
+JWT_NO_EXPORT
+int jwt_apply_b64_header(jwt_t *jwt);
+
+/* Checker: parse + verify a JWS JSON Serialization against the checker's
+ * key/keyring and policy. Returns 0 if the policy is satisfied. */
+JWT_NO_EXPORT
+int jwt_verify_json(jwt_checker_t *checker, const char *token);
+
+/* @rfc{7515,4.1.3} Build + confirm a verification key from the protected
+ * header's "jwk" (embedded-JWK verify). Returns an owned jwk_set_t (caller
+ * frees) with *out set to the contained item, or NULL if disabled/absent/
+ * unconfirmed. See jwt-verify.c. */
+JWT_NO_EXPORT
+jwk_set_t *jwt_embedded_jwk_key(struct jwt_common *c, jwt_json_t *headers,
+				const jwk_item_t **out);
+
+/* @rfc{7515,7.2.1} Non-zero if any member of @header also appears in
+ * @protected (a parameter must not be in both). */
+JWT_NO_EXPORT
+int jwt_header_params_overlap(const jwt_json_t *protected,
+			      const jwt_json_t *header);
 
 /* JWE alg/enc <-> string maps (jwe-setget.c). These are exported as part of
  * the public API (jwe_alg_str etc.), declared in jwt.h. */
@@ -601,6 +813,12 @@ static inline jwk_key_type_t jwe_alg_required_kty(jwe_key_alg_t alg)
 	case JWE_ALG_A128KW:
 	case JWE_ALG_A192KW:
 	case JWE_ALG_A256KW:
+	case JWE_ALG_A128GCMKW:
+	case JWE_ALG_A192GCMKW:
+	case JWE_ALG_A256GCMKW:
+	case JWE_ALG_PBES2_HS256_A128KW:
+	case JWE_ALG_PBES2_HS384_A192KW:
+	case JWE_ALG_PBES2_HS512_A256KW:
 		return JWK_KEY_TYPE_OCT;
 
 	case JWE_ALG_RSA_OAEP:
@@ -653,6 +871,35 @@ JWT_NO_EXPORT
 int jwe_decrypt_cek(jwe_key_alg_t alg, const jwk_item_t *key,
 		    const unsigned char *in, size_t in_len,
 		    unsigned char **cek, size_t *cek_len);
+
+/* AES-GCM Key Wrap (RFC 7518 4.7). Wrap/unwrap the CEK by GCM-encrypting it
+ * under the oct KEK with a fresh 96-bit IV (mandatory) and empty AAD; the IV
+ * and tag are carried in the per-recipient header (@hdr) as "iv"/"tag". */
+JWT_NO_EXPORT
+int jwe_alg_is_gcmkw(jwe_key_alg_t alg);
+JWT_NO_EXPORT
+int jwe_gcmkw_wrap(jwe_key_alg_t alg, const jwk_item_t *key,
+		   const unsigned char *cek, size_t cek_len,
+		   jwt_json_t *hdr, unsigned char **out, size_t *out_len);
+JWT_NO_EXPORT
+int jwe_gcmkw_unwrap(jwe_key_alg_t alg, const jwk_item_t *key, jwt_json_t *hdr,
+		     const unsigned char *in, size_t in_len,
+		     unsigned char **cek, size_t *cek_len);
+
+/* PBES2 password-based key management (RFC 7518 4.8). PBKDF2 (over a fresh salt)
+ * derives a KEK from the oct key's octets (the password); the CEK is AES-KW
+ * wrapped. "p2s" (salt) and "p2c" (iterations) ride in the per-recipient header;
+ * @p2c on wrap is 0 for the default. The decrypt side caps p2c and the salt. */
+JWT_NO_EXPORT
+int jwe_alg_is_pbes2(jwe_key_alg_t alg);
+JWT_NO_EXPORT
+int jwe_pbes2_wrap(jwe_key_alg_t alg, const jwk_item_t *key,
+		   const unsigned char *cek, size_t cek_len, unsigned int p2c,
+		   jwt_json_t *hdr, unsigned char **out, size_t *out_len);
+JWT_NO_EXPORT
+int jwe_pbes2_unwrap(jwe_key_alg_t alg, const jwk_item_t *key, jwt_json_t *hdr,
+		     const unsigned char *in, size_t in_len,
+		     unsigned char **cek, size_t *cek_len);
 
 /* ECDH-ES (RFC 7518 4.6). Direct mode derives the CEK directly. */
 JWT_NO_EXPORT

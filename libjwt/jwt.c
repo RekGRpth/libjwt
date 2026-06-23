@@ -329,6 +329,8 @@ fallback_ops:
 int jwt_sign(jwt_t *jwt, char **out, unsigned int *len, const char *str,
 	     unsigned int str_len)
 {
+	struct jwt_crypto_ops *ops;
+
 	switch (jwt->alg) {
 	/* HMAC */
 	case JWT_ALG_HS256:
@@ -376,7 +378,15 @@ int jwt_sign(jwt_t *jwt, char **out, unsigned int *len, const char *str,
 #endif
 		if (__check_key_bits(jwt))
 			return 1;
-		if (jwt_ops->sign_sha_pem(jwt, out, len, str, str_len)) {
+		/* Route to the backend that parsed the key, not the active ops. */
+		ops = jwt_item_ops(jwt->key);
+		if (ops == NULL) {
+			// LCOV_EXCL_START
+			jwt_write_error(jwt, "Key's crypto backend is not available");
+			return 1;
+			// LCOV_EXCL_STOP
+		}
+		if (ops->sign_sha_pem(jwt, out, len, str, str_len)) {
 			jwt_write_error(jwt, "Token failed signing");
 			return 1;
 		} else {
@@ -444,6 +454,7 @@ static int _verify_sha_hmac(jwt_t *jwt, const char *head,
 jwt_t *jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
 		      const char *sig_b64)
 {
+	struct jwt_crypto_ops *ops;
 	int sig_len;
 	char_auto *sig = NULL;
 
@@ -490,8 +501,15 @@ jwt_t *jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
 			break;
 		}
 
-		if (jwt_ops->verify_sha_pem(jwt, head, head_len,
-					    (unsigned char *)sig, sig_len))
+		/* Route to the backend that parsed the key, not the active ops. */
+		ops = jwt_item_ops(jwt->key);
+		if (ops == NULL) {
+			jwt_write_error(jwt, "Key's crypto backend is not available"); // LCOV_EXCL_LINE
+			break; // LCOV_EXCL_LINE
+		}
+
+		if (ops->verify_sha_pem(jwt, head, head_len,
+					(unsigned char *)sig, sig_len))
 			jwt_write_error(jwt, "Token failed verification");
 		break;
 
@@ -575,7 +593,7 @@ static const unsigned char base64de[] = {
 	    49,  50,  51, 255, 255, 255, 255, 255
 };
 
-static unsigned int
+unsigned int
 base64_encode(const unsigned char *in, unsigned int inlen, char *out)
 {
 	int s;
@@ -624,7 +642,7 @@ base64_encode(const unsigned char *in, unsigned int inlen, char *out)
 	return j;
 }
 
-static unsigned int
+unsigned int
 base64_decode(const char *in, unsigned int inlen, unsigned char *out)
 {
 	unsigned int i;

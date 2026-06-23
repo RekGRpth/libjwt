@@ -111,9 +111,11 @@ EOF
 }
 
 @test "Convert JWK to PEM - OCT" {
-	rm -f oct_384.bin
+	rm -f oct_384*.bin
 	./tools/jwk2key -d . ${SRCDIR}/tests/keys/oct_key_384.json
-	cmp oct_384.bin ${SRCDIR}/tests/cli/oct_384.bin
+	# oct_key_384.json carries no "kid", so jwk2key names the file by the
+	# key's RFC 7638 thumbprint: oct_384_<thumbprint>.bin
+	cmp oct_384_*.bin ${SRCDIR}/tests/cli/oct_384.bin
 }
 
 # JWE tools
@@ -221,8 +223,9 @@ ECENC="../tests/keys/ec_key_prime256v1_enc.json"
 # A crash is not a reliable signal (the overflow lands in adjacent stack
 # memory and often doesn't fault), so instead assert the *observable*
 # outcome: with the fix, bits is safely truncated and a correctly named
-# oct_1050000.bin is written. Without the fix, the overflow corrupts the
-# output path and that file is never created.
+# oct_1050000_<thumbprint>.bin is written (the JWK has no "kid", so jwk2key
+# names it by thumbprint). Without the fix, the overflow corrupts the output
+# path and that file is never created.
 @test "jwk2key handles oversized oct key without buffer overflow (#264)" {
 	dir="${BATS_TMPDIR:-/tmp}/jwk2key264_$$"
 	mkdir -p "${dir}"
@@ -236,7 +239,7 @@ ECENC="../tests/keys/ec_key_prime256v1_enc.json"
 
 	status_was="${status}"
 	have_out=0
-	[ -f "${dir}/oct_1050000.bin" ] && have_out=1
+	ls "${dir}"/oct_1050000_*.bin >/dev/null 2>&1 && have_out=1
 	rm -rf "${dir}"
 
 	# Must not crash (128+signal) and must produce the correctly named file.
@@ -282,4 +285,45 @@ mldsa_supported() {
 		${SRCDIR}/tests/keys/mldsa-pem/mldsa_key_65.pem 2>/dev/null \
 		| jq -r '.keys[0].kty')
 	[ "${kty}" = "AKP" ]
+}
+
+# JWS JSON Serialization (multi-signature, RFC 7515 7.2) — issue #308
+EC_KEY="../tests/keys/ec_key_prime256v1.json"
+RS_KEY="../tests/keys/rsa_key_2048.json"
+JWS_RING="../tests/keys/jwks_jws_pair.json"
+
+@test "Generate a Flattened JWS and verify it" {
+	token="$(./tools/jwt-generate -q -n -F flat -k ${EC_KEY})"
+	[ "${token:0:1}" = "{" ]
+	echo "${token}" | jq -e '.protected and .signature and (.signatures | not)'
+	./tools/jwt-verify -q -k ${EC_KEY} "${token}"
+}
+
+@test "Generate a General multi-signature JWS (RS256 + ES256)" {
+	token="$(./tools/jwt-generate -q -n -k ${RS_KEY} -k ${EC_KEY})"
+	echo "${token}" | jq -e '.signatures | length == 2'
+}
+
+@test "Verify a multi-signature JWS against a keyring (policy any)" {
+	token="$(./tools/jwt-generate -q -n -k ${RS_KEY} -k ${EC_KEY})"
+	./tools/jwt-verify -q -r ${JWS_RING} -P any "${token}"
+}
+
+@test "Verify a multi-signature JWS against a keyring (policy all)" {
+	token="$(./tools/jwt-generate -q -n -k ${RS_KEY} -k ${EC_KEY})"
+	./tools/jwt-verify -q -r ${JWS_RING} -P all "${token}"
+}
+
+@test "Policy all fails when the keyring lacks a signer's key" {
+	token="$(./tools/jwt-generate -q -n -k ${RS_KEY} -k ${EC_KEY})"
+	# A ring with only the EC key: ES256 verifies, RS256 does not.
+	run ./tools/jwt-verify -q -r ${EC_KEY} -P all "${token}"
+	[ "${status}" -ne 0 ]
+	run ./tools/jwt-verify -q -r ${EC_KEY} -P any "${token}"
+	[ "${status}" -eq 0 ]
+}
+
+@test "key and keyring are mutually exclusive" {
+	run ./tools/jwt-verify -k ${EC_KEY} -r ${JWS_RING} "x.y.z"
+	[ "${status}" -ne 0 ]
 }

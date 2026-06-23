@@ -12,6 +12,7 @@
  *
  * @include{doc} mainpage.dox
  * @include{doc} examples.dox
+ * @include{doc} profiles.dox
  */
 
 #ifndef JWT_H
@@ -25,6 +26,14 @@
 extern "C" {
 #endif
 
+/** @ingroup jwt_claims_helpers_grp
+ * @brief Integer type used for numeric claim and header values
+ *
+ * Defined as ``long long`` when supported, otherwise ``long``; this is the
+ * type of the integer member of @ref jwt_value_t.
+ *
+ * @since 3.2.2
+ */
 #if JWT_USES_LONG_LONG
 typedef long long jwt_long_t;
 #else
@@ -35,6 +44,7 @@ typedef long jwt_long_t;
  * @brief Opaque JWT object
  *
  * Used in callbacks when generating or verifying a JWT
+ * @since 3.0.0
  */
 typedef struct jwt jwt_t;
 
@@ -46,6 +56,7 @@ typedef struct jwt jwt_t;
  * @remark All JWK operations require that you import your JWK into a jwk_set_t
  * first. Internal, LibJWT creates a jwk_set_t even for single keys. This makes
  * code pretty much the same whether working with one JWK or a set of them.
+ * @since 3.0.0
  */
 typedef struct jwk_set jwk_set_t;
 
@@ -55,6 +66,7 @@ typedef struct jwk_set jwk_set_t;
  * These are the supported algorithm types for LibJWT.
  *
  * @rfc{7518,3.1}
+ * @since 3.0.0
  */
 typedef enum {
 	JWT_ALG_NONE = 0,	/**< No signature */
@@ -71,12 +83,29 @@ typedef enum {
 	JWT_ALG_PS384,		/**< RSASSA-PSS using SHA-384 and MGF1 with SHA-384 */
 	JWT_ALG_PS512,		/**< RSASSA-PSS using SHA-512 and MGF1 with SHA-512 */
 	JWT_ALG_ES256K,		/**< ECDSA using secp256k1 and SHA-256 */
-	JWT_ALG_EDDSA,		/**< EdDSA using Ed25519 */
-	JWT_ALG_ML_DSA_44,	/**< ML-DSA-44 (FIPS 204, RFC 9964) (experimental) */
-	JWT_ALG_ML_DSA_65,	/**< ML-DSA-65 (FIPS 204, RFC 9964) (experimental) */
-	JWT_ALG_ML_DSA_87,	/**< ML-DSA-87 (FIPS 204, RFC 9964) (experimental) */
+	JWT_ALG_EDDSA,		/**< EdDSA using Ed25519 or Ed448 */
+	JWT_ALG_ML_DSA_44,	/**< ML-DSA-44 (FIPS 204, RFC 9964) (experimental) @since 3.5.0 */
+	JWT_ALG_ML_DSA_65,	/**< ML-DSA-65 (FIPS 204, RFC 9964) (experimental) @since 3.5.0 */
+	JWT_ALG_ML_DSA_87,	/**< ML-DSA-87 (FIPS 204, RFC 9964) (experimental) @since 3.5.0 */
 	JWT_ALG_INVAL,		/**< An invalid algorithm from the caller or the token */
 } jwt_alg_t;
+
+/** @ingroup jwt_alg_grp
+ * @brief Hash algorithm for a JWK Thumbprint and related digests
+ *
+ * Selects the digest used by jwks_item_thumbprint() /
+ * jwks_item_thumbprint_uri(), the embedded-JWK pin
+ * (jwt_checker_enable_embedded_jwk()), and jwt_token_hash(). SHA-256 is the
+ * value 0, so it is the default for a zero-initialized argument and is what
+ * virtually all deployments use.
+ *
+ * @since 3.6.0
+ */
+typedef enum {
+	JWK_THUMBPRINT_SHA256 = 0,	/**< SHA-256 (default) */
+	JWK_THUMBPRINT_SHA384,		/**< SHA-384 */
+	JWK_THUMBPRINT_SHA512,		/**< SHA-512 */
+} jwk_thumbprint_alg_t;
 
 /** @ingroup jwt_alg_grp
  * @brief JWE key management algorithm types
@@ -88,6 +117,7 @@ typedef enum {
  * and JWS are not the same.
  *
  * @rfc{7518,4.1}
+ * @since 3.4.0
  */
 typedef enum {
 	JWE_ALG_NONE = 0,	/**< No/unset key management algorithm */
@@ -101,6 +131,12 @@ typedef enum {
 	JWE_ALG_ECDH_ES_A128KW,	/**< ECDH-ES using Concat KDF and CEK wrapped with A128KW */
 	JWE_ALG_ECDH_ES_A192KW,	/**< ECDH-ES using Concat KDF and CEK wrapped with A192KW */
 	JWE_ALG_ECDH_ES_A256KW,	/**< ECDH-ES using Concat KDF and CEK wrapped with A256KW */
+	JWE_ALG_A128GCMKW,	/**< Key wrapping with AES GCM using a 128-bit key @since 3.6.0 */
+	JWE_ALG_A192GCMKW,	/**< Key wrapping with AES GCM using a 192-bit key @since 3.6.0 */
+	JWE_ALG_A256GCMKW,	/**< Key wrapping with AES GCM using a 256-bit key @since 3.6.0 */
+	JWE_ALG_PBES2_HS256_A128KW,	/**< PBES2 with HMAC SHA-256 and A128KW wrapping @since 3.6.0 */
+	JWE_ALG_PBES2_HS384_A192KW,	/**< PBES2 with HMAC SHA-384 and A192KW wrapping @since 3.6.0 */
+	JWE_ALG_PBES2_HS512_A256KW,	/**< PBES2 with HMAC SHA-512 and A256KW wrapping @since 3.6.0 */
 	JWE_ALG_INVAL,		/**< An invalid algorithm from the caller or the token */
 } jwe_key_alg_t;
 
@@ -112,6 +148,7 @@ typedef enum {
  * plaintext using the CEK.
  *
  * @rfc{7518,5.1}
+ * @since 3.4.0
  */
 typedef enum {
 	JWE_ENC_NONE = 0,	/**< No/unset content encryption algorithm */
@@ -134,6 +171,7 @@ typedef enum {
  * ``recipients`` array for one or more recipients.
  *
  * @rfc{7516,7}
+ * @since 3.4.0
  */
 typedef enum {
 	JWE_FORMAT_COMPACT = 0,	/**< @rfc{7516,7.1} Compact Serialization (default) */
@@ -150,6 +188,7 @@ typedef enum {
  *  has been compiled to support it. Also, certain functions of the
  *  library may not be supported by each. For example, not all of them
  *  support JWKS operations.
+ * @since 3.0.0
  **/
 typedef enum {
 	JWT_CRYPTO_OPS_NONE = 0,	/**< Used for error handling */
@@ -166,6 +205,7 @@ typedef enum {
  *
  * @rfc{7517,4.1}
  * @rfc{7518,6.1}
+ * @since 3.0.0
  */
 typedef enum {
 	JWK_KEY_TYPE_NONE = 0,		/**< Unused on valid keys */
@@ -173,7 +213,7 @@ typedef enum {
 	JWK_KEY_TYPE_RSA,		/**< RSA keys (RSA and RSA-PSS) */
 	JWK_KEY_TYPE_OKP,		/**< Octet Key Pair (e.g. EdDSA) */
 	JWK_KEY_TYPE_OCT,		/**< Octet sequence (e.g. HS256) */
-	JWK_KEY_TYPE_AKP,		/**< Algorithm Key Pair (e.g. ML-DSA) @rfc{9964,3} */
+	JWK_KEY_TYPE_AKP,		/**< Algorithm Key Pair (e.g. ML-DSA) @rfc{9964,3} @since 3.5.0 */
 } jwk_key_type_t;
 
 /** @ingroup jwks_item_grp
@@ -182,6 +222,7 @@ typedef enum {
  * Corresponds to the ``"use"`` attribute in a JWK the represents a public key.
  *
  * @rfc{7517,4.2}
+ * @since 3.0.0
  **/
 typedef enum {
 	JWK_PUB_KEY_USE_NONE = 0,	/**< No usable attribute was set */
@@ -204,6 +245,7 @@ typedef enum {
  * @endcode
  *
  * @rfc{7517,4.3}
+ * @since 3.0.0
  **/
 typedef enum {
 	JWK_KEY_OP_NONE		= 0x0000,	/**< No key_op set */
@@ -220,6 +262,7 @@ typedef enum {
 
 /** @ingroup jwt_claims_helpers_grp
  * @brief Value types for claims and headers
+ * @since 3.0.0
  */
 typedef enum {
 	JWT_VALUE_NONE = 0,	/**< No type (do not use this)		*/
@@ -232,6 +275,7 @@ typedef enum {
 
 /** @ingroup jwt_claims_helpers_grp
  * @brief Error values for header and claim requests
+ * @since 3.0.0
  */
 typedef enum {
 	JWT_VALUE_ERR_NONE = 0,	/**< No error, success			*/
@@ -251,6 +295,7 @@ typedef enum {
  * @note There are helper macros to simplify setting this structure properly and
  *  reducing common mistakes. See the jwt_set_{SET,GET}_{INT,STR,BOOL,JSON}
  *  definitions.
+ * @since 3.0.0
  */
 typedef struct {
 	jwt_value_type_t type;
@@ -272,16 +317,19 @@ typedef struct {
  * This object is produced by importing a JWK or JWKS into a  @ref jwk_set_t
  * object. It represents single key and is used when generating or verifying
  * JWT.
+ * @since 3.0.0
  */
 typedef struct jwk_item jwk_item_t;
 
 /** @ingroup jwt_memory_grp
  * @brief Prototype for malloc(3)
+ * @since 3.0.0
  */
 typedef void *(*jwt_malloc_t)(size_t);
 
 /** @ingroup jwt_memory_grp
  * @brief Prototype for free(3)
+ * @since 3.0.0
  */
 typedef void (*jwt_free_t)(void *);
 
@@ -292,12 +340,14 @@ typedef void (*jwt_free_t)(void *);
  *
  * @param jwt Pointer to a JWT object.
  * @returns Returns a jwt_alg_t type for this object.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_alg_t jwt_get_alg(const jwt_t *jwt);
 
 /** @ingroup jwt_object_grp
  * @brief Structure used to pass state with a user callback
+ * @since 3.0.0
  */
 typedef struct {
 	const jwk_item_t *key;	/**< A JWK to use for key	*/
@@ -307,6 +357,7 @@ typedef struct {
 
 /** @ingroup jwt_object_grp
  * @brief General callback for generation and verification of JWT
+ * @since 3.0.0
  */
 typedef int (*jwt_callback_t)(jwt_t *, jwt_config_t *);
 
@@ -319,6 +370,7 @@ typedef int (*jwt_callback_t)(jwt_t *, jwt_config_t *);
  * called, otherwise the allocator passed to jwt_set_alloc(). Returning NULL
  * aborts token generation. The application is responsible for ensuring the
  * id is unique.
+ * @since 3.4.0
  */
 typedef char *(*jwt_jti_gen_cb_t)(const jwt_t *, jwt_config_t *);
 
@@ -329,11 +381,13 @@ typedef char *(*jwt_jti_gen_cb_t)(const jwt_t *, jwt_config_t *);
  * accept the token or non-zero to reject it (e.g. an unknown or
  * already-consumed id). This is where an application implements replay
  * protection against its own id pool.
+ * @since 3.4.0
  */
 typedef int (*jwt_jti_check_cb_t)(const jwt_t *, jwt_config_t *, const char *);
 
 /** @ingroup jwt_claims_helpers_grp
  * @brief WFC defined claims
+ * @since 3.0.0
  */
 typedef enum {
         JWT_CLAIM_ISS           = 0x0001, /**< @rfc_t{7519,4.1.1} ``"iss"`` */
@@ -365,6 +419,7 @@ typedef enum {
 
 /**
  * @brief Opaque Builder Object
+ * @since 3.0.0
  */
 typedef struct jwt_builder jwt_builder_t;
 
@@ -372,6 +427,7 @@ typedef struct jwt_builder jwt_builder_t;
  * @brief Function to create a new builder instance
  *
  * @return Pointer to a builder object on success, NULL on failure
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_builder_t *jwt_builder_new(void);
@@ -380,17 +436,19 @@ jwt_builder_t *jwt_builder_new(void);
  * @brief Frees a previously created builder object
  *
  * @param builder Pointer to a builder object
+ * @since 3.0.0
  */
 JWT_EXPORT
 void jwt_builder_free(jwt_builder_t *builder);
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(_DOXYGEN)
 /**
  * @brief Helper function to free a builder and set the pointer to NULL
  *
  * This is mainly to use with the jwt_builder_auto_t type.
  *
  * @param Pointer to a pointer for a jwt_builder_t object
+ * @since 3.0.0
  */
 static inline void jwt_builder_freep(jwt_builder_t **builder) {
 	if (builder) {
@@ -398,6 +456,15 @@ static inline void jwt_builder_freep(jwt_builder_t **builder) {
 		*builder = NULL;
 	}
 }
+/**
+ * @brief A jwt_builder_t pointer that is freed automatically at scope exit
+ *
+ * Declares a jwt_builder_t pointer carrying the GCC/Clang ``cleanup``
+ * attribute so jwt_builder_free() is invoked on it automatically when the
+ * variable goes out of scope. Initialize it where you declare it.
+ *
+ * @since 3.0.0
+ */
 #define jwt_builder_auto_t jwt_builder_t \
 	__attribute__((cleanup(jwt_builder_freep)))
 #endif
@@ -407,6 +474,7 @@ static inline void jwt_builder_freep(jwt_builder_t **builder) {
  *
  * @param builder Pointer to a builder object
  * @return 0 if no errors exist, non-zero otherwise
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_builder_error(const jwt_builder_t *builder);
@@ -417,6 +485,7 @@ int jwt_builder_error(const jwt_builder_t *builder);
  * @param builder Pointer to a builder object
  * @return Pointer to a string with the error message. Can be an empty string
  *  if there is no error. Never returns NULL.
+ * @since 3.0.0
  */
 JWT_EXPORT
 const char *jwt_builder_error_msg(const jwt_builder_t *builder);
@@ -425,6 +494,7 @@ const char *jwt_builder_error_msg(const jwt_builder_t *builder);
  * @brief Clear error state in a builder object
  *
  * @param builder Pointer to a builder object
+ * @since 3.0.0
  */
 JWT_EXPORT
 void jwt_builder_error_clear(jwt_builder_t *builder);
@@ -454,10 +524,179 @@ void jwt_builder_error_clear(jwt_builder_t *builder);
  * @param alg A valid jwt_alg_t type
  * @param key A JWK key object
  * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_builder_setkey(jwt_builder_t *builder, const jwt_alg_t alg,
 		       const jwk_item_t *key);
+
+/**
+ * @brief JWS serialization formats
+ *
+ * Selects what jwt_builder_generate() emits and is auto-detected by
+ * jwt_checker_verify() on input. The Compact Serialization (the default and
+ * historic behavior) is a single ``header.payload.signature`` string. The
+ * two JSON Serializations (@rfc{7515,7.2}) wrap one or more signatures in a
+ * JSON object and are the only forms that can carry multiple signatures or a
+ * per-signature unprotected header.
+ *
+ * @since 3.6.0
+ */
+typedef enum {
+	JWT_FORMAT_COMPACT = 0,	/**< @rfc{7515,7.1} Compact (default)		*/
+	JWT_FORMAT_JSON_FLAT,	/**< @rfc{7515,7.2.2} Flattened (single sig)	*/
+	JWT_FORMAT_JSON_GENERAL,/**< @rfc{7515,7.2.1} General ("signatures":[])	*/
+} jwt_serialization_t;
+
+/**
+ * @brief An additional signer on a builder
+ *
+ * An opaque handle returned by jwt_builder_add_signature(), used to attach a
+ * per-signature protected or unprotected header. It is owned by the builder
+ * and is valid until jwt_builder_free(); the caller must not free it.
+ *
+ * @since 3.6.0
+ */
+typedef struct jwt_signature jwt_signature_t;
+
+/**
+ * @brief Select the serialization a builder emits
+ *
+ * The default is ::JWT_FORMAT_COMPACT. Selecting a JSON form makes
+ * jwt_builder_generate() emit the JWS JSON Serialization. Adding a second
+ * signer with jwt_builder_add_signature() also forces ::JWT_FORMAT_JSON_GENERAL.
+ *
+ * @param builder Pointer to a builder object
+ * @param format A ::jwt_serialization_t value
+ * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_builder_set_format(jwt_builder_t *builder, jwt_serialization_t format);
+
+/**
+ * @brief Add an additional signer to a builder
+ *
+ * The first signer is set with jwt_builder_setkey(); this adds further ones for
+ * a multi-signature JWS JSON Serialization. The second signer automatically
+ * promotes the format to ::JWT_FORMAT_JSON_GENERAL. Each signature signs over
+ * its own protected header and the shared payload, so signers may use different
+ * algorithms (e.g. RS256 and ES256). ``alg`` must not be ::JWT_ALG_NONE.
+ *
+ * @param builder Pointer to a builder object
+ * @param alg A valid ::jwt_alg_t type (not ::JWT_ALG_NONE)
+ * @param key A JWK private key matching @p alg
+ * @return A borrowed ::jwt_signature_t handle (owned by the builder), or NULL
+ *  on error with the error set in the builder
+ * @since 3.6.0
+ */
+JWT_EXPORT
+jwt_signature_t *jwt_builder_add_signature(jwt_builder_t *builder, jwt_alg_t alg,
+					   const jwk_item_t *key);
+
+/**
+ * @brief Add a member to a signature's protected header
+ *
+ * The value is parsed as JSON. The member is integrity-protected (it is part
+ * of the bytes this signature signs over) and is the right place for a
+ * per-signer ``kid``. Library-managed names (``alg``) and duplicates are
+ * rejected.
+ *
+ * @param signature A handle from jwt_builder_add_signature()
+ * @param key The header parameter name
+ * @param value_json The value as a JSON string
+ * @return 0 on success, non-zero otherwise
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_signature_add_protected_json(jwt_signature_t *signature,
+				     const char *key, const char *value_json);
+
+/**
+ * @brief Add a member to a signature's unprotected header
+ *
+ * The value is parsed as JSON. The member is NOT integrity-protected and is
+ * only emitted in the JSON serializations (@rfc{7515,7.2.1}). It must be
+ * disjoint from this signature's protected header.
+ *
+ * @param signature A handle from jwt_builder_add_signature()
+ * @param key The header parameter name
+ * @param value_json The value as a JSON string
+ * @return 0 on success, non-zero otherwise
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_signature_add_header_json(jwt_signature_t *signature,
+				  const char *key, const char *value_json);
+
+/**
+ * @brief Sign an opaque (non-claims) payload
+ *
+ * Sets a raw payload to be signed verbatim instead of JSON claims, for a
+ * generic JWS (RFC 7515) — for example RFC 7797 unencoded payloads or a
+ * detached signature over an arbitrary document (JAdES). This is mutually
+ * exclusive with claims: when a raw payload is set it is used and any claims
+ * are ignored. Pass @p data as NULL (or @p len 0) to clear it and return to
+ * the claims model. The bytes are copied.
+ *
+ * @param builder Pointer to a builder object
+ * @param data The payload bytes (copied), or NULL to clear
+ * @param len The payload length in bytes
+ * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_builder_setpayload(jwt_builder_t *builder, const unsigned char *data,
+			   size_t len);
+
+/**
+ * @brief Select base64url or unencoded payload (RFC 7797)
+ *
+ * With @p b64 nonzero (the default) the payload is base64url-encoded as usual.
+ * With @p b64 zero, @rfc{7797} unencoded payloads are produced: ``"b64":false``
+ * is emitted in the protected header, ``"b64"`` is added to ``"crit"``, and the
+ * signature is computed over the **raw** payload bytes. Requires a raw payload
+ * (jwt_builder_setpayload()), since RFC 7797 forbids the option for JWTs.
+ *
+ * @param builder Pointer to a builder object
+ * @param b64 Nonzero for base64url (default), zero for an unencoded payload
+ * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_builder_setb64(jwt_builder_t *builder, int b64);
+
+/**
+ * @brief Detach the payload from the output
+ *
+ * With @p detached nonzero, the produced token omits the payload (an empty
+ * payload part in the Compact form, no ``"payload"`` member in the JSON forms).
+ * The verifier must supply the payload out-of-band with
+ * jwt_checker_verify_detached(). Orthogonal to jwt_builder_setb64().
+ *
+ * @param builder Pointer to a builder object
+ * @param detached Nonzero to omit the payload from the output
+ * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_builder_set_detached(jwt_builder_t *builder, int detached);
+
+/**
+ * @brief Set the token media type ("typ" header)
+ *
+ * A convenience setter for the ``"typ"`` header parameter, naming the token's
+ * media type — e.g. ``"at+jwt"`` (RFC 9068), ``"dpop+jwt"``, ``"secevent+jwt"``.
+ * Equivalent to setting the ``"typ"`` header directly. Pair it with
+ * jwt_checker_expect_typ() on the verifying side.
+ *
+ * @param builder Pointer to a builder object
+ * @param typ The media type string, or NULL to clear it
+ * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_builder_settyp(jwt_builder_t *builder, const char *typ);
 
 /**
  * @brief Set IssuedAt usage on builder
@@ -468,6 +707,7 @@ int jwt_builder_setkey(jwt_builder_t *builder, const jwt_alg_t alg,
  * @param builder Pointer to a builder object
  * @param enable 0 to disable, any other value to enable
  * @return Previous value (0 or 1), or -1 on error
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_builder_enable_iat(jwt_builder_t *builder, int enable);
@@ -491,6 +731,7 @@ int jwt_builder_enable_iat(jwt_builder_t *builder, int enable);
  * @param cb Pointer to a callback function
  * @param ctx Pointer to data to pass to the callback function
  * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_builder_setcb(jwt_builder_t *builder, jwt_callback_t cb, void *ctx);
@@ -513,6 +754,7 @@ int jwt_builder_setcb(jwt_builder_t *builder, jwt_callback_t cb, void *ctx);
  * @param cb Pointer to a jti generation callback
  * @param ctx Pointer to data to pass to the callback
  * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwt_builder_setjti(jwt_builder_t *builder, jwt_jti_gen_cb_t cb, void *ctx);
@@ -525,6 +767,7 @@ int jwt_builder_setjti(jwt_builder_t *builder, jwt_jti_gen_cb_t cb, void *ctx);
  *
  * @param builder Pointer to a builder object
  * @return Pointer to the context or NULL
+ * @since 3.0.0
  */
 JWT_EXPORT
 void *jwt_builder_getctx(jwt_builder_t *builder);
@@ -547,6 +790,7 @@ void *jwt_builder_getctx(jwt_builder_t *builder);
  * @param builder Pointer to a builder object
  * @param header Name of the header parameter to mark as critical
  * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwt_builder_setcrit(jwt_builder_t *builder, const char *header);
@@ -610,6 +854,7 @@ int jwt_builder_setcrit(jwt_builder_t *builder, const char *header);
  * @return A string containing a JWT. Caller is respondible for freeing the
  *  memory for this string. On error, NULL is returned and error is set in
  *  the builder object.
+ * @since 3.0.0
  */
 JWT_EXPORT
 char *jwt_builder_generate(jwt_builder_t *builder);
@@ -633,6 +878,7 @@ char *jwt_builder_generate(jwt_builder_t *builder);
 
 /**
  * @brief Opaque Checker object
+ * @since 3.0.0
  */
 typedef struct jwt_checker jwt_checker_t;
 
@@ -640,6 +886,7 @@ typedef struct jwt_checker jwt_checker_t;
  * @brief Function to create a new checker instance
  *
  * @return Pointer to a checker object on success, NULL on failure
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_checker_t *jwt_checker_new(void);
@@ -648,15 +895,16 @@ jwt_checker_t *jwt_checker_new(void);
  * @brief Frees a previously created checker object
  *
  * @param checker Pointer to a checker object
+ * @since 3.0.0
  */
 JWT_EXPORT
 void jwt_checker_free(jwt_checker_t *checker);
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(_DOXYGEN)
 /**
  * @brief Helper function to free a checker and set the pointer to NULL
  *
- * This is mainly to use with the jwt checker_auto_t type. Example usage:
+ * This is mainly to use with the jwt_checker_auto_t type. Example usage:
  *
  * @code
  * int run_check (const char *token)
@@ -670,7 +918,8 @@ void jwt_checker_free(jwt_checker_t *checker);
  * }
  * @endcode
  *
- * @param Pointer to a pointer for a jwt checker_t object
+ * @param Pointer to a pointer for a jwt_checker_t object
+ * @since 3.0.0
  */
 static inline void jwt_checker_freep(jwt_checker_t **checker) {
         if (checker) {
@@ -678,6 +927,15 @@ static inline void jwt_checker_freep(jwt_checker_t **checker) {
                 *checker = NULL;
         }
 }
+/**
+ * @brief A jwt_checker_t pointer that is freed automatically at scope exit
+ *
+ * Declares a jwt_checker_t pointer carrying the GCC/Clang ``cleanup``
+ * attribute so jwt_checker_free() is invoked on it automatically when the
+ * variable goes out of scope. Initialize it where you declare it.
+ *
+ * @since 3.0.0
+ */
 #define jwt_checker_auto_t jwt_checker_t \
         __attribute__((cleanup(jwt_checker_freep)))
 #endif
@@ -687,6 +945,7 @@ static inline void jwt_checker_freep(jwt_checker_t **checker) {
  *
  * @param checker Pointer to a checker object
  * @return 0 if no errors exist, non-zero otherwise
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_checker_error(const jwt_checker_t *checker);
@@ -697,6 +956,7 @@ int jwt_checker_error(const jwt_checker_t *checker);
  * @param checker Pointer to a checker object
  * @return Pointer to a string with the error message. Can be an empty string
  *  if there is no error. Never returns NULL.
+ * @since 3.0.0
  */
 JWT_EXPORT
 const char *jwt_checker_error_msg(const jwt_checker_t *checker);
@@ -705,6 +965,7 @@ const char *jwt_checker_error_msg(const jwt_checker_t *checker);
  * @brief Clear error state in a checker object
  *
  * @param checker Pointer to a checker object
+ * @since 3.0.0
  */
 JWT_EXPORT
 void jwt_checker_error_clear(jwt_checker_t *checker);
@@ -718,10 +979,166 @@ void jwt_checker_error_clear(jwt_checker_t *checker);
  * @param alg A valid jwt_alg_t type
  * @param key A JWK key object
  * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_checker_setkey(jwt_checker_t *checker, const jwt_alg_t alg, const
 		       jwk_item_t *key);
+
+/**
+ * @brief Multi-signature verification policy
+ *
+ * Governs how jwt_checker_verify() decides on a JWS JSON Serialization that
+ * carries more than one signature (@rfc{7515,7.2} leaves this to the
+ * application). It has no effect on a Compact or single-signature token.
+ *
+ * @since 3.6.0
+ */
+typedef enum {
+	JWT_VERIFY_POLICY_ANY = 0,	/**< Accept if >=1 signature verifies	*/
+	JWT_VERIFY_POLICY_ALL,		/**< Accept only if every signature does	*/
+} jwt_verify_policy_t;
+
+/**
+ * @brief Set a keyring and policy for multi-signature verification
+ *
+ * Supplies a set of candidate keys (a JWKS) instead of the single key set by
+ * jwt_checker_setkey(), so a JWS JSON Serialization with multiple signatures
+ * can be verified. A signature naming a ``kid`` is matched to that key in the
+ * ring; a keyless signature is tried against every compatible key. Each
+ * candidate is held to the usual algorithm/key-type binding.
+ *
+ * Under ::JWT_VERIFY_POLICY_ANY (the default and the generalization of the
+ * single-key behavior) the token is accepted if at least one signature
+ * verifies; under ::JWT_VERIFY_POLICY_ALL every signature in the token must
+ * verify. The keyring is borrowed: the caller retains ownership and must keep
+ * it valid for the lifetime of the checker. Setting a keyring and setting a
+ * single key are mutually exclusive; the last call wins.
+ *
+ * @param checker Pointer to a checker object
+ * @param keyring A JWKS of candidate keys (borrowed, not freed by the checker)
+ * @param policy A ::jwt_verify_policy_t value
+ * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_checker_setkeyring(jwt_checker_t *checker, const jwk_set_t *keyring,
+			   jwt_verify_policy_t policy);
+
+/**
+ * @brief Require a specific token media type ("typ" header)
+ *
+ * When set, jwt_checker_verify() rejects a token whose ``"typ"`` header does not
+ * match @p typ. The comparison is case-insensitive and tolerates the optional
+ * ``application/`` prefix (RFC 6838), so ``expect_typ(c, "at+jwt")`` accepts both
+ * ``"at+jwt"`` and ``"application/at+jwt"``. This is the standardized
+ * cross-JWT-confusion defense (@rfc{8725} §3.11).
+ *
+ * @param checker Pointer to a checker object
+ * @param typ The required media type, or NULL to clear the requirement
+ * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_checker_expect_typ(jwt_checker_t *checker, const char *typ);
+
+/**
+ * @brief Set an allowlist of acceptable algorithms
+ *
+ * Restricts the algorithms jwt_checker_verify() will accept to the given set,
+ * checked before any signature work (@rfc{8725}). Useful when verifying against
+ * a keyring (jwt_checker_setkeyring()) where several algorithms are acceptable,
+ * e.g. ``{JWT_ALG_RS256, JWT_ALG_ES256}``. A token whose ``"alg"`` is not in the
+ * set is rejected, which also blocks an ``alg:none`` downgrade. Passing @p n as
+ * 0 (or @p algs as NULL) clears the allowlist.
+ *
+ * @param checker Pointer to a checker object
+ * @param algs An array of acceptable ::jwt_alg_t values (copied)
+ * @param n The number of entries in @p algs
+ * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_checker_setalgs(jwt_checker_t *checker, const jwt_alg_t *algs, size_t n);
+
+/**
+ * @brief Require that a set of claims is present
+ *
+ * @rfc{9068,4}
+ *
+ * When set, jwt_checker_verify() rejects a token that is missing any of the
+ * named claims, independent of any value match (a value check is a separate
+ * concern -- see jwt_checker_claim_set()). LibJWT otherwise validates only the
+ * claims it is told to compare, and silently tolerates an absent one; this
+ * asserts the mandatory-claims discipline that profiles such as RFC 9068
+ * (@c at+jwt) require -- e.g. @c {"iss","exp","aud","sub","client_id","jti"}.
+ * The names are copied. Passing @p count as 0 (or @p claims as NULL) clears the
+ * requirement.
+ *
+ * @param checker Pointer to a checker object
+ * @param claims An array of claim names that must be present (copied)
+ * @param count The number of names in @p claims
+ * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_checker_require(jwt_checker_t *checker, const char **claims,
+			unsigned int count);
+
+/**
+ * @brief Verify using the key embedded in the header, pinned by thumbprint
+ *
+ * @rfc{7515,4.1.3} @rfc{9449}
+ *
+ * Enables taking the verification key from the token's protected-header @c "jwk"
+ * (a self-contained token, as used by DPoP and OpenID4VCI key proofs). Because
+ * that key is supplied by whoever made the token, it is **never trusted on its
+ * own**: it is accepted only if its JWK Thumbprint (@p alg) equals @p
+ * expected_jkt -- the value you obtained out of band and are pinning to, such as
+ * the @c cnf.jkt of a presented access token (read with jwt_get_cnf()). The
+ * confirmed key is still held to the usual key-type/algorithm binding. Combine
+ * with jwt_checker_setalgs() to bound the acceptable algorithms.
+ *
+ * Passing a NULL or empty @p expected_jkt fails: there is no "trust whatever is
+ * embedded" mode. Applies to the Compact Serialization (what DPoP/OpenID4VCI
+ * use). Mutually exclusive with the keyring form; the last call wins.
+ *
+ * @param checker Pointer to a checker object
+ * @param alg The hash for the thumbprint comparison (see @ref jwk_thumbprint_alg_t)
+ * @param expected_jkt The pinned base64url JWK Thumbprint the embedded key must match
+ * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_checker_enable_embedded_jwk(jwt_checker_t *checker,
+				    jwk_thumbprint_alg_t alg,
+				    const char *expected_jkt);
+
+/**
+ * @brief Verify using the key embedded in the header, allowed by a keyring
+ *
+ * @rfc{7515,4.1.3}
+ *
+ * As jwt_checker_enable_embedded_jwk(), but the protected-header @c "jwk" is
+ * accepted only if its JWK Thumbprint (@p alg) matches that of some key in @p
+ * allowed (via jwks_find_bythumbprint()). Use this when the set of acceptable
+ * holder keys is known in advance rather than pinned per token. The keyring is
+ * borrowed: the caller retains ownership and must keep it valid for the
+ * lifetime of the checker.
+ *
+ * Passing a NULL @p allowed fails. Mutually exclusive with the pinned form; the
+ * last call wins.
+ *
+ * @param checker Pointer to a checker object
+ * @param alg The hash for the thumbprint comparison (see @ref jwk_thumbprint_alg_t)
+ * @param allowed A JWKS of acceptable keys (borrowed, not freed by the checker)
+ * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_checker_enable_embedded_jwk_keyring(jwt_checker_t *checker,
+					    jwk_thumbprint_alg_t alg,
+					    const jwk_set_t *allowed);
 
 /**
  * @brief Set a callback for generating tokens
@@ -747,6 +1164,7 @@ int jwt_checker_setkey(jwt_checker_t *checker, const jwt_alg_t alg, const
  * @param cb Pointer to a callback function
  * @param ctx Pointer to data to pass to the callback function
  * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_checker_setcb(jwt_checker_t *checker, jwt_callback_t cb, void *ctx);
@@ -769,6 +1187,7 @@ int jwt_checker_setcb(jwt_checker_t *checker, jwt_callback_t cb, void *ctx);
  * @param cb Pointer to a jti verification callback
  * @param ctx Pointer to data to pass to the callback
  * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwt_checker_setjti(jwt_checker_t *checker, jwt_jti_check_cb_t cb, void *ctx);
@@ -781,6 +1200,7 @@ int jwt_checker_setjti(jwt_checker_t *checker, jwt_jti_check_cb_t cb, void *ctx)
  *
  * @param checker Pointer to a checker object
  * @return Pointer to the context or NULL
+ * @since 3.0.0
  */
 JWT_EXPORT
 void *jwt_checker_getctx(jwt_checker_t *checker);
@@ -803,6 +1223,7 @@ void *jwt_checker_getctx(jwt_checker_t *checker);
  * @param checker Pointer to a checker object
  * @param header Name of the critical header parameter the application understands
  * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwt_checker_understands(jwt_checker_t *checker, const char *header);
@@ -815,9 +1236,74 @@ int jwt_checker_understands(jwt_checker_t *checker, const char *header);
  * @param checker Pointer to a checker object
  * @param token A string containing a token to be verified
  * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_checker_verify(jwt_checker_t *checker, const char *token);
+
+/**
+ * @brief Number of signatures in the last verified token
+ *
+ * After jwt_checker_verify(), returns how many signatures the token carried
+ * (1 for a Compact or Flattened token, N for a General one, 0 if verification
+ * failed before the signatures were parsed).
+ *
+ * @param checker Pointer to a checker object
+ * @return The signature count of the last token
+ * @since 3.6.0
+ */
+JWT_EXPORT
+unsigned int jwt_checker_sig_count(const jwt_checker_t *checker);
+
+/**
+ * @brief Whether a given signature of the last token verified
+ *
+ * After jwt_checker_verify(), reports per-signature results. Useful under
+ * ::JWT_VERIFY_POLICY_ANY to learn which signature(s) passed.
+ *
+ * @param checker Pointer to a checker object
+ * @param index A signature index in ``[0, jwt_checker_sig_count())``
+ * @return 1 if signature @p index verified against a keyring key, 0 otherwise
+ *  (including an out-of-range index)
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_checker_sig_verified(const jwt_checker_t *checker, unsigned int index);
+
+/**
+ * @brief The key a given signature of the last token verified against
+ *
+ * @param checker Pointer to a checker object
+ * @param index A signature index in ``[0, jwt_checker_sig_count())``
+ * @return The keyring key that verified signature @p index, or NULL if it did
+ *  not verify or the index is out of range. Borrowed from the keyring; do not
+ *  free.
+ * @since 3.6.0
+ */
+JWT_EXPORT
+const jwk_item_t *jwt_checker_sig_key(const jwt_checker_t *checker,
+				      unsigned int index);
+
+/**
+ * @brief Verify a token whose payload was detached
+ *
+ * Verifies a token produced with jwt_builder_set_detached() (or any JWS with a
+ * detached payload), supplying the payload out-of-band. Works for both
+ * base64url and @rfc{7797} unencoded (``"b64":false``) payloads; the signing
+ * input is reconstructed from @p payload according to the token's ``"b64"``
+ * header. As with jwt_checker_verify(), an unencoded payload is accepted only
+ * if ``"b64"`` is present in the token's ``"crit"`` header (RFC 7797 §6).
+ *
+ * @param checker Pointer to a checker object
+ * @param token A string containing the (detached) token to verify
+ * @param payload The out-of-band payload bytes
+ * @param len The payload length in bytes
+ * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_checker_verify_detached(jwt_checker_t *checker, const char *token,
+				const unsigned char *payload, size_t len);
 
 /**
  * @}
@@ -880,6 +1366,7 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
  * @param __v Pointer to a jwt_value_t object
  * @param __n Name of the value
  * @return No return value
+ * @since 3.0.0
  */
 #define jwt_set_GET_INT(__v, __n) ({	\
 	(__v)->type=JWT_VALUE_INT;	\
@@ -892,6 +1379,7 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
  * @param __v Pointer to a jwt_value_t object
  * @param __n Name of the value
  * @return No return value
+ * @since 3.0.0
  */
 #define jwt_set_GET_STR(__v, __n) ({	\
 	(__v)->type=JWT_VALUE_STR;	\
@@ -904,6 +1392,7 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
  * @param __v Pointer to a jwt_value_t object
  * @param __n Name of the value
  * @return No return value
+ * @since 3.0.0
  */
 #define jwt_set_GET_BOOL(__v, __n) ({	\
 	(__v)->type=JWT_VALUE_BOOL;	\
@@ -916,6 +1405,7 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
  * @param __v Pointer to a jwt_value_t object
  * @param __n Name of the value
  * @return No return value
+ * @since 3.0.0
  */
 #define jwt_set_GET_JSON(__v, __n) ({			\
 	(__v)->type=JWT_VALUE_JSON;(__v)->pretty=0;	\
@@ -968,6 +1458,7 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
  * @param __n Name of the value
  * @param __x Value to set
  * @return No return value
+ * @since 3.0.0
  */
 #define jwt_set_SET_INT(__v, __n, __x) ({		\
 	(__v)->type=JWT_VALUE_INT;(__v)->replace=0;	\
@@ -981,6 +1472,7 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
  * @param __n Name of the value
  * @param __x Value to set
  * @return No return value
+ * @since 3.0.0
  */
 #define jwt_set_SET_STR(__v, __n, __x) ({		\
 	(__v)->type=JWT_VALUE_STR;(__v)->replace=0;	\
@@ -994,6 +1486,7 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
  * @param __n Name of the value
  * @param __x Value to set
  * @return No return value
+ * @since 3.0.0
  */
 #define jwt_set_SET_BOOL(__v, __n, __x) ({		\
 	(__v)->type=JWT_VALUE_BOOL;(__v)->replace=0;	\
@@ -1007,6 +1500,7 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
  * @param __n Name of the value
  * @param __x Value to set
  * @return No return value
+ * @since 3.0.0
  */
 #define jwt_set_SET_JSON(__v, __n, __x) ({			\
 	(__v)->type=JWT_VALUE_JSON;(__v)->replace=0;		\
@@ -1050,6 +1544,7 @@ int jwt_checker_verify(jwt_checker_t *checker, const char *token);
  * @param value Pointer to a jwt_value_t object representing the value to set
  * @return JWT_VALUE_ERR_NONE on success, one of the jwt_value_error_t return
  *  on error.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_builder_header_set(jwt_builder_t *builder, jwt_value_t
@@ -1062,6 +1557,7 @@ jwt_value_error_t jwt_builder_header_set(jwt_builder_t *builder, jwt_value_t
  * @param value Pointer to a jwt_value_t object representing the value to get
  * @return JWT_VALUE_ERR_NONE on success, one of the jwt_value_error_t return
  *  on error. Also, the relevant value.*_val will be set on success.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_builder_header_get(jwt_builder_t *builder, jwt_value_t
@@ -1074,6 +1570,7 @@ jwt_value_error_t jwt_builder_header_get(jwt_builder_t *builder, jwt_value_t
  * @param header Name of the header delete
  * @return JWT_VALUE_ERR_NONE on success, one of the jwt_value_error_t return
  *  on error.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_builder_header_del(jwt_builder_t *builder, const char
@@ -1086,6 +1583,7 @@ jwt_value_error_t jwt_builder_header_del(jwt_builder_t *builder, const char
  * @param value Pointer to a jwt_value_t object representing the value to set
  * @return JWT_VALUE_ERR_NONE on success, one of the jwt_value_error_t return
  *  on error.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_builder_claim_set(jwt_builder_t *builder, jwt_value_t
@@ -1098,6 +1596,7 @@ jwt_value_error_t jwt_builder_claim_set(jwt_builder_t *builder, jwt_value_t
  * @param value Pointer to a jwt_value_t object representing the value to get
  * @return JWT_VALUE_ERR_NONE on success, one of the jwt_value_error_t return
  *  on error. Also, the relevant value.*_val will be set on success.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_builder_claim_get(jwt_builder_t *builder, jwt_value_t
@@ -1110,6 +1609,7 @@ jwt_value_error_t jwt_builder_claim_get(jwt_builder_t *builder, jwt_value_t
  * @param claim Name of the claim delete
  * @return JWT_VALUE_ERR_NONE on success, one of the jwt_value_error_t return
  *  on error.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_builder_claim_del(jwt_builder_t *builder, const char
@@ -1127,6 +1627,7 @@ jwt_value_error_t jwt_builder_claim_del(jwt_builder_t *builder, const char
  * @param secs Seconds of offset to add to ``now`` when generating the
  *  specified claim
  * @return 0 on success, any other value for an error
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_builder_time_offset(jwt_builder_t *builder, jwt_claims_t claim,
@@ -1184,6 +1685,7 @@ int jwt_builder_time_offset(jwt_builder_t *builder, jwt_claims_t claim,
  * @param checker Pointer to a checker object
  * @param type One of JWT_CLAIM_ISS, JWT_CLAIM_AUD, or JWT_CLAIM_SUB
  * @return A string representation of the claim, or NULL if it isn't set
+ * @since 3.0.0
  */
 JWT_EXPORT
 const char *jwt_checker_claim_get(jwt_checker_t *checker, jwt_claims_t type);
@@ -1195,6 +1697,7 @@ const char *jwt_checker_claim_get(jwt_checker_t *checker, jwt_claims_t type);
  * @param type One of JWT_CLAIM_ISS, JWT_CLAIM_AUD, or JWT_CLAIM_SUB
  * @param value A string to set as the new value of the validation
  * @return 0 on success, any other value is an error
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_checker_claim_set(jwt_checker_t *checker, jwt_claims_t type,
@@ -1206,6 +1709,7 @@ int jwt_checker_claim_set(jwt_checker_t *checker, jwt_claims_t type,
  * @param checker Pointer to a checker object
  * @param type One of JWT_CLAIM_ISS, JWT_CLAIM_AUD, or JWT_CLAIM_SUB
  * @return 0 on success, any other value is an error
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_checker_claim_del(jwt_checker_t *checker, jwt_claims_t type);
@@ -1222,6 +1726,7 @@ int jwt_checker_claim_del(jwt_checker_t *checker, jwt_claims_t type);
  * @param claim One of JWT_CLAIM_NBF or JWT_CLAIM_EXP
  * @param secs The number of seconds of leeway to account for being valid
  * @return 0 on success, any other value is an error
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_checker_time_leeway(jwt_checker_t *checker, jwt_claims_t claim,
@@ -1256,6 +1761,7 @@ int jwt_checker_time_leeway(jwt_checker_t *checker, jwt_claims_t claim,
  * @param value A jwt_value_t structure with relevant actions filled in
  * @return A jwt_value_error_t value, JWT_VALUE_ERR_NONE being success. The
  *  value.error field will match this return value.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_header_set(jwt_t *jwt, jwt_value_t *value);
@@ -1267,6 +1773,7 @@ jwt_value_error_t jwt_header_set(jwt_t *jwt, jwt_value_t *value);
  * @param value A jwt_value_t structure with relevant actions filled in
  * @return A jwt_value_error_t value, JWT_VALUE_ERR_NONE being success. The
  *  value.error field will match this return value.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_header_get(jwt_t *jwt, jwt_value_t *value);
@@ -1278,6 +1785,7 @@ jwt_value_error_t jwt_header_get(jwt_t *jwt, jwt_value_t *value);
  * @param header The name of the header to delete, or NULL to clear the entire
  *  header
  * @return A jwt_value_error_t value, JWT_VALUE_ERR_NONE being success.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_header_del(jwt_t *jwt, const char *header);
@@ -1289,6 +1797,7 @@ jwt_value_error_t jwt_header_del(jwt_t *jwt, const char *header);
  * @param value A jwt_value_t structure with relevant actions filled in
  * @return A jwt_value_error_t value, JWT_VALUE_ERR_NONE being success. The
  *  value.error field will match this return value.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_claim_set(jwt_t *jwt, jwt_value_t *value);
@@ -1300,6 +1809,7 @@ jwt_value_error_t jwt_claim_set(jwt_t *jwt, jwt_value_t *value);
  * @param value A jwt_value_t structure with relevant actions filled in
  * @return A jwt_value_error_t value, JWT_VALUE_ERR_NONE being success. The
  *  value.error field will match this return value.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_claim_get(jwt_t *jwt, jwt_value_t *value);
@@ -1310,9 +1820,122 @@ jwt_value_error_t jwt_claim_get(jwt_t *jwt, jwt_value_t *value);
  * @param jwt Pointer to a jwt_t token, previously created with jwt_create()
  * @param claim The name of the claim to delete, or NULL to clear all claims
  * @return A jwt_value_error_t value, JWT_VALUE_ERR_NONE being success.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_value_error_t jwt_claim_del(jwt_t *jwt, const char *claim);
+
+/**
+ * @brief Set the "cnf" (confirmation) claim to a key thumbprint
+ *
+ * @rfc{7800} @rfc{9449,6}
+ *
+ * Sets @c "cnf" to a single @c "jkt" member holding the RFC 7638 SHA-256 JWK
+ * thumbprint of @p key (the DPoP confirmation method). Any existing @c "cnf"
+ * is replaced, so the object always carries exactly one confirmation member.
+ *
+ * @param builder Pointer to a builder object
+ * @param key The proof-of-possession public key to bind the token to
+ * @return 0 on success, non-zero on error
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_builder_setcnf_jkt(jwt_builder_t *builder, const jwk_item_t *key);
+
+/**
+ * @brief Set the "cnf" (confirmation) claim to an embedded JWK
+ *
+ * @rfc{7800,3.2}
+ *
+ * Sets @c "cnf" to a single @c "jwk" member holding the public JWK of @p key.
+ * Only public parameters are embedded. Any existing @c "cnf" is replaced.
+ *
+ * @param builder Pointer to a builder object
+ * @param key The proof-of-possession public key to embed
+ * @return 0 on success, non-zero on error
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_builder_setcnf_jwk(jwt_builder_t *builder, const jwk_item_t *key);
+
+/**
+ * @brief Set the "cnf" (confirmation) claim to a single string member
+ *
+ * @rfc{7800}
+ *
+ * Sets @c "cnf" to a single member named @p member with string value @p value
+ * -- e.g. @c "kid" (RFC 7800), @c "x5t#S256" (RFC 8705 mTLS), or @c "jku". Any
+ * existing @c "cnf" is replaced, so the object always carries exactly one
+ * confirmation member.
+ *
+ * @param builder Pointer to a builder object
+ * @param member The confirmation member name (e.g. @c "kid", @c "x5t#S256")
+ * @param value The member's string value
+ * @return 0 on success, non-zero on error
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwt_builder_setcnf(jwt_builder_t *builder, const char *member,
+		       const char *value);
+
+/**
+ * @brief Read a string-valued "cnf" (confirmation) member from a token
+ *
+ * @rfc{7800}
+ *
+ * Returns the value of @c cnf.@p member (e.g. @c "jkt", @c "kid",
+ * @c "x5t#S256") for a verified token. Because a verifier obtains the @ref
+ * jwt_t inside its jwt_checker_setcb() callback, this is where you call it to
+ * confirm a presented proof-of-possession key.
+ *
+ * @param jwt Pointer to a jwt_t token
+ * @param member The confirmation member name to read
+ * @return A newly allocated, nil-terminated string the caller must free with
+ *   free(), or NULL if @c cnf or the member is absent or not a string
+ * @since 3.6.0
+ */
+JWT_EXPORT
+char *jwt_get_cnf(const jwt_t *jwt, const char *member);
+
+/**
+ * @brief Compute a base64url token hash (full digest)
+ *
+ * @rfc{9449,4.1}
+ *
+ * Returns @c base64url(SHA-x(@p value)) over the @em full digest. This is the
+ * DPoP @c "ath" (access token hash): bind a DPoP proof to an access token with
+ * @c jwt_token_hash(access_token, ::JWK_THUMBPRINT_SHA256) and set the result as
+ * the proof's @c "ath" claim (RFC 9449 pins SHA-256). It is also the generic
+ * "hash this string and base64url it" helper.
+ *
+ * @param value The string to hash (e.g. the access token), nil-terminated
+ * @param alg The digest to use (see @ref jwk_thumbprint_alg_t); RFC 9449 @c ath
+ *   uses @ref JWK_THUMBPRINT_SHA256
+ * @return A newly allocated, nil-terminated base64url string the caller must
+ *   free with free(), or NULL on error
+ * @since 3.6.0
+ */
+JWT_EXPORT
+char *jwt_token_hash(const char *value, jwk_thumbprint_alg_t alg);
+
+/**
+ * @brief Compute a base64url token hash (left half of the digest)
+ *
+ * Returns @c base64url(left-half(SHA-x(@p value))), where the digest width is
+ * the one the JWS algorithm @p alg signs with (HS/RS/ES/PS-256 -> SHA-256, -384
+ * -> SHA-384, -512 and EdDSA -> SHA-512). This is the OpenID Connect @c "at_hash"
+ * and @c "c_hash" construction (OIDC Core 3.1.3.6 / 3.3.2.11): take the
+ * left-most half of the hash @em bytes before base64url. Distinct from
+ * jwt_token_hash(), which uses the full digest and is keyed to a hash selector.
+ *
+ * @param value The string to hash (an access token or authorization code)
+ * @param alg The signing ::jwt_alg_t whose hash width is used
+ * @return A newly allocated, nil-terminated base64url string the caller must
+ *   free with free(), or NULL on error (including an @p alg with no SHA-2 width)
+ * @since 3.6.0
+ */
+JWT_EXPORT
+char *jwt_token_hash_half(const char *value, jwt_alg_t alg);
 
 /**
  * @}
@@ -1341,6 +1964,7 @@ jwt_value_error_t jwt_claim_del(jwt_t *jwt, const char *claim);
  * @param alg A valid jwt_alg_t specifier.
  * @returns Returns a string (e.g. "RS256") matching the alg or NULL for
  *     invalid alg.
+ * @since 3.0.0
  */
 JWT_EXPORT
 const char *jwt_alg_str(jwt_alg_t alg);
@@ -1357,6 +1981,7 @@ const char *jwt_alg_str(jwt_alg_t alg);
  *  or @ref JWT_ALG_INVAL if no  matches were found.
  *
  * @note This only works for algorithms that LibJWT supports or knows about.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_alg_t jwt_str_alg(const char *alg);
@@ -1367,6 +1992,7 @@ jwt_alg_t jwt_str_alg(const char *alg);
  * @param alg A valid jwe_key_alg_t specifier.
  * @returns Returns a string (e.g. "RSA-OAEP") matching the alg or NULL for
  *     an invalid alg.
+ * @since 3.4.0
  */
 JWT_EXPORT
 const char *jwe_alg_str(jwe_key_alg_t alg);
@@ -1379,6 +2005,7 @@ const char *jwe_alg_str(jwe_key_alg_t alg);
  * @param alg A valid string for a JWE key management algorithm (e.g. "A128KW").
  * @returns Returns a @ref jwe_key_alg_t matching the string or
  *  @ref JWE_ALG_INVAL if no matches were found.
+ * @since 3.4.0
  */
 JWT_EXPORT
 jwe_key_alg_t jwe_str_alg(const char *alg);
@@ -1389,6 +2016,7 @@ jwe_key_alg_t jwe_str_alg(const char *alg);
  * @param enc A valid jwe_enc_t specifier.
  * @returns Returns a string (e.g. "A256GCM") matching the enc or NULL for
  *     an invalid enc.
+ * @since 3.4.0
  */
 JWT_EXPORT
 const char *jwe_enc_str(jwe_enc_t enc);
@@ -1402,6 +2030,7 @@ const char *jwe_enc_str(jwe_enc_t enc);
  *  (e.g. "A256GCM").
  * @returns Returns a @ref jwe_enc_t matching the string or
  *  @ref JWE_ENC_INVAL if no matches were found.
+ * @since 3.4.0
  */
 JWT_EXPORT
 jwe_enc_t jwe_str_enc(const char *enc);
@@ -1456,6 +2085,7 @@ jwe_enc_t jwe_str_enc(const char *enc);
 
 /**
  * @brief Opaque JWE Builder (encryption) object
+ * @since 3.4.0
  */
 typedef struct jwe_builder jwe_builder_t;
 
@@ -1467,6 +2097,7 @@ typedef struct jwe_builder jwe_builder_t;
  * builder and valid until the builder is freed; do not free it directly.
  *
  * @rfc{7516,7.2.1}
+ * @since 3.4.0
  */
 typedef struct jwe_recipient jwe_recipient_t;
 
@@ -1474,6 +2105,7 @@ typedef struct jwe_recipient jwe_recipient_t;
  * @brief Create a new JWE builder instance
  *
  * @return Pointer to a JWE builder object on success, NULL on failure
+ * @since 3.4.0
  */
 JWT_EXPORT
 jwe_builder_t *jwe_builder_new(void);
@@ -1482,14 +2114,16 @@ jwe_builder_t *jwe_builder_new(void);
  * @brief Free a previously created JWE builder object
  *
  * @param builder Pointer to a JWE builder object
+ * @since 3.4.0
  */
 JWT_EXPORT
 void jwe_builder_free(jwe_builder_t *builder);
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(_DOXYGEN)
 /**
  * @brief Helper to free a JWE builder and set the pointer to NULL
  * @param builder Pointer to a pointer for a jwe_builder_t object
+ * @since 3.4.0
  */
 static inline void jwe_builder_freep(jwe_builder_t **builder) {
 	if (builder) {
@@ -1497,6 +2131,15 @@ static inline void jwe_builder_freep(jwe_builder_t **builder) {
 		*builder = NULL;
 	}
 }
+/**
+ * @brief A jwe_builder_t pointer that is freed automatically at scope exit
+ *
+ * Declares a jwe_builder_t pointer carrying the GCC/Clang ``cleanup``
+ * attribute so jwe_builder_free() is invoked on it automatically when the
+ * variable goes out of scope. Initialize it where you declare it.
+ *
+ * @since 3.4.0
+ */
 #define jwe_builder_auto_t jwe_builder_t \
 	__attribute__((cleanup(jwe_builder_freep)))
 #endif
@@ -1505,6 +2148,7 @@ static inline void jwe_builder_freep(jwe_builder_t **builder) {
  * @brief Check error state of a JWE builder object
  * @param builder Pointer to a JWE builder object
  * @return 0 if no errors exist, non-zero otherwise
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_builder_error(const jwe_builder_t *builder);
@@ -1513,6 +2157,7 @@ int jwe_builder_error(const jwe_builder_t *builder);
  * @brief Get the error message contained in a JWE builder object
  * @param builder Pointer to a JWE builder object
  * @return Pointer to the error message string (empty if none). Never NULL.
+ * @since 3.4.0
  */
 JWT_EXPORT
 const char *jwe_builder_error_msg(const jwe_builder_t *builder);
@@ -1520,6 +2165,7 @@ const char *jwe_builder_error_msg(const jwe_builder_t *builder);
 /**
  * @brief Clear error state in a JWE builder object
  * @param builder Pointer to a JWE builder object
+ * @since 3.4.0
  */
 JWT_EXPORT
 void jwe_builder_error_clear(jwe_builder_t *builder);
@@ -1532,6 +2178,7 @@ void jwe_builder_error_clear(jwe_builder_t *builder);
  * @param enc The JWE content encryption algorithm (``"enc"`` header)
  * @param key The recipient key (a JWK) used for key management
  * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_builder_setkey(jwe_builder_t *builder, jwe_key_alg_t alg,
@@ -1552,6 +2199,7 @@ int jwe_builder_setkey(jwe_builder_t *builder, jwe_key_alg_t alg,
  * @param apv PartyVInfo octets, or NULL
  * @param apv_len Length of @p apv in bytes
  * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_builder_set_partyinfo(jwe_builder_t *builder,
@@ -1579,6 +2227,7 @@ int jwe_builder_set_partyinfo(jwe_builder_t *builder,
  *  freed) on success, or NULL on error (with the error set in the builder)
  *
  * @rfc{7516,7.2.1}
+ * @since 3.4.0
  */
 JWT_EXPORT
 jwe_recipient_t *jwe_builder_add_recipient(jwe_builder_t *builder,
@@ -1598,6 +2247,7 @@ jwe_recipient_t *jwe_builder_add_recipient(jwe_builder_t *builder,
  * @param apv PartyVInfo octets, or NULL
  * @param apv_len Length of @p apv in bytes
  * @return 0 on success, non-zero otherwise
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_recipient_set_partyinfo(jwe_recipient_t *recipient,
@@ -1618,6 +2268,7 @@ int jwe_recipient_set_partyinfo(jwe_recipient_t *recipient,
  * @param key The header parameter name
  * @param value_json The parameter value as a JSON fragment
  * @return 0 on success, non-zero otherwise
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_recipient_add_header_json(jwe_recipient_t *recipient, const char *key,
@@ -1639,6 +2290,7 @@ int jwe_recipient_add_header_json(jwe_recipient_t *recipient, const char *key,
  * @return 0 on success, non-zero otherwise with error set in the builder
  *
  * @rfc{7516,7}
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_builder_set_format(jwe_builder_t *builder, jwe_serialization_t format);
@@ -1661,6 +2313,7 @@ int jwe_builder_set_format(jwe_builder_t *builder, jwe_serialization_t format);
  * @param key The header parameter name
  * @param value_json The parameter value as a JSON fragment
  * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_builder_add_protected_json(jwe_builder_t *builder, const char *key,
@@ -1681,6 +2334,7 @@ int jwe_builder_add_protected_json(jwe_builder_t *builder, const char *key,
  * @return 0 on success, non-zero otherwise with error set in the builder
  *
  * @rfc{7516,7.2.1}
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_builder_add_unprotected_json(jwe_builder_t *builder, const char *key,
@@ -1699,10 +2353,29 @@ int jwe_builder_add_unprotected_json(jwe_builder_t *builder, const char *key,
  * @param aad The AAD octets, or NULL
  * @param aad_len Length of @p aad in bytes
  * @return 0 on success, non-zero otherwise with error set in the builder
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_builder_set_aad(jwe_builder_t *builder, const unsigned char *aad,
 			size_t aad_len);
+
+/**
+ * @brief Set the PBES2 iteration count
+ *
+ * Sets the PBKDF2 iteration count (the ``p2c`` header parameter) used by the
+ * ``PBES2-*`` password-based key-management algorithms. Pass 0 to use the
+ * library default. A higher count increases resistance to password guessing at
+ * the cost of more work per encrypt/decrypt; it has no effect on non-PBES2
+ * algorithms. On decrypt the library enforces a hard maximum on an
+ * attacker-supplied ``p2c`` regardless of this setting.
+ *
+ * @param builder Pointer to a JWE builder object
+ * @param p2c The PBKDF2 iteration count, or 0 for the library default
+ * @return 0 on success, non-zero otherwise
+ * @since 3.6.0
+ */
+JWT_EXPORT
+int jwe_builder_setpbes2(jwe_builder_t *builder, unsigned int p2c);
 
 /**
  * @brief Encrypt a plaintext into a JWE
@@ -1716,6 +2389,7 @@ int jwe_builder_set_aad(jwe_builder_t *builder, const unsigned char *aad,
  * @param plaintext_len Length of @p plaintext in bytes
  * @return A newly allocated, nil-terminated JWE string the caller must free,
  *  or NULL on error (with the error set in the builder)
+ * @since 3.4.0
  */
 JWT_EXPORT
 char *jwe_builder_generate(jwe_builder_t *builder,
@@ -1740,6 +2414,7 @@ char *jwe_builder_generate(jwe_builder_t *builder,
 
 /**
  * @brief Opaque JWE Checker (decryption) object
+ * @since 3.4.0
  */
 typedef struct jwe_checker jwe_checker_t;
 
@@ -1747,6 +2422,7 @@ typedef struct jwe_checker jwe_checker_t;
  * @brief Create a new JWE checker instance
  *
  * @return Pointer to a JWE checker object on success, NULL on failure
+ * @since 3.4.0
  */
 JWT_EXPORT
 jwe_checker_t *jwe_checker_new(void);
@@ -1755,14 +2431,16 @@ jwe_checker_t *jwe_checker_new(void);
  * @brief Free a previously created JWE checker object
  *
  * @param checker Pointer to a JWE checker object
+ * @since 3.4.0
  */
 JWT_EXPORT
 void jwe_checker_free(jwe_checker_t *checker);
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(_DOXYGEN)
 /**
  * @brief Helper to free a JWE checker and set the pointer to NULL
  * @param checker Pointer to a pointer for a jwe_checker_t object
+ * @since 3.4.0
  */
 static inline void jwe_checker_freep(jwe_checker_t **checker) {
 	if (checker) {
@@ -1770,6 +2448,15 @@ static inline void jwe_checker_freep(jwe_checker_t **checker) {
 		*checker = NULL;
 	}
 }
+/**
+ * @brief A jwe_checker_t pointer that is freed automatically at scope exit
+ *
+ * Declares a jwe_checker_t pointer carrying the GCC/Clang ``cleanup``
+ * attribute so jwe_checker_free() is invoked on it automatically when the
+ * variable goes out of scope. Initialize it where you declare it.
+ *
+ * @since 3.4.0
+ */
 #define jwe_checker_auto_t jwe_checker_t \
 	__attribute__((cleanup(jwe_checker_freep)))
 #endif
@@ -1778,6 +2465,7 @@ static inline void jwe_checker_freep(jwe_checker_t **checker) {
  * @brief Check error state of a JWE checker object
  * @param checker Pointer to a JWE checker object
  * @return 0 if no errors exist, non-zero otherwise
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_checker_error(const jwe_checker_t *checker);
@@ -1786,6 +2474,7 @@ int jwe_checker_error(const jwe_checker_t *checker);
  * @brief Get the error message contained in a JWE checker object
  * @param checker Pointer to a JWE checker object
  * @return Pointer to the error message string (empty if none). Never NULL.
+ * @since 3.4.0
  */
 JWT_EXPORT
 const char *jwe_checker_error_msg(const jwe_checker_t *checker);
@@ -1793,6 +2482,7 @@ const char *jwe_checker_error_msg(const jwe_checker_t *checker);
 /**
  * @brief Clear error state in a JWE checker object
  * @param checker Pointer to a JWE checker object
+ * @since 3.4.0
  */
 JWT_EXPORT
 void jwe_checker_error_clear(jwe_checker_t *checker);
@@ -1805,6 +2495,7 @@ void jwe_checker_error_clear(jwe_checker_t *checker);
  * @param enc The expected JWE content encryption algorithm (``"enc"`` header)
  * @param key The key (a JWK) used to recover the CEK
  * @return 0 on success, non-zero otherwise with error set in the checker
+ * @since 3.4.0
  */
 JWT_EXPORT
 int jwe_checker_setkey(jwe_checker_t *checker, jwe_key_alg_t alg,
@@ -1823,6 +2514,7 @@ int jwe_checker_setkey(jwe_checker_t *checker, jwe_key_alg_t alg,
  * @return A newly allocated buffer of decrypted plaintext the caller must
  *  free, or NULL on error (with the error set in the checker). The buffer is
  *  nil-terminated for convenience, but @p plaintext_len gives the true length.
+ * @since 3.4.0
  */
 JWT_EXPORT
 unsigned char *jwe_checker_decrypt(jwe_checker_t *checker, const char *token,
@@ -1844,6 +2536,7 @@ unsigned char *jwe_checker_decrypt(jwe_checker_t *checker, const char *token,
  *  caller must free, or NULL on error (with the error set in the checker)
  *
  * @rfc{7516,7}
+ * @since 3.4.0
  */
 JWT_EXPORT
 unsigned char *jwe_checker_decrypt_all(jwe_checker_t *checker,
@@ -1861,6 +2554,7 @@ unsigned char *jwe_checker_decrypt_all(jwe_checker_t *checker,
  * @param checker Pointer to a JWE checker object
  * @param aad_len If non-NULL, set to the length of the returned AAD in bytes
  * @return Pointer to the AAD octets, or NULL if none
+ * @since 3.4.0
  */
 JWT_EXPORT
 const unsigned char *jwe_checker_get_aad(const jwe_checker_t *checker,
@@ -1921,6 +2615,7 @@ const unsigned char *jwe_checker_get_aad(const jwe_checker_t *checker,
  *   or array of "keys".
  * @return A valid jwt_set_t on success. On failure, either NULL
  *   or a jwt_set_t with error set. NULL generally means ENOMEM.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_load(jwk_set_t *jwk_set, const char *jwk_json_str);
@@ -1939,6 +2634,7 @@ jwk_set_t *jwks_load(jwk_set_t *jwk_set, const char *jwk_json_str);
  *   read.
  * @return A valid jwt_set_t on success. On failure, either NULL
  *   or a jwt_set_t with error set. NULL generally means ENOMEM.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_load_strn(jwk_set_t *jwk_set, const char *jwk_json_str,
@@ -1956,6 +2652,7 @@ jwk_set_t *jwks_load_strn(jwk_set_t *jwk_set, const char *jwk_json_str,
  *   or array of "keys".
  * @return A valid jwt_set_t on success. On failure, either NULL
  *   or a jwt_set_t with error set. NULL generally means ENOMEM.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_load_fromfile(jwk_set_t *jwk_set, const char *file_name);
@@ -1974,6 +2671,7 @@ jwk_set_t *jwks_load_fromfile(jwk_set_t *jwk_set, const char *file_name);
  *   or array of "keys" can be fread() from.
  * @return A valid jwt_set_t on success. On failure, either NULL
  *   or a jwt_set_t with error set. NULL generally means ENOMEM.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_load_fromfp(jwk_set_t *jwk_set, FILE *input);
@@ -2000,18 +2698,21 @@ jwk_set_t *jwks_load_fromfp(jwk_set_t *jwk_set, FILE *input);
  *   insecure (use only for testing).
  * @return A valid jwt_set_t on success. On failure, either NULL
  *   or a jwt_set_t with error set. NULL generally means ENOMEM.
+ * @since 3.2.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_load_fromurl(jwk_set_t *jwk_set, const char *url, int verify);
 
 /**
  * @brief Wrapper around jwks_load() that explicitly creates a new keyring
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_create(const char *jwk_json_str);
 
 /**
  * @brief Wrapper around jwks_load_strn() that explicitly creates a new keyring
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_create_strn(const char *jwk_json_str, const size_t len);
@@ -2019,6 +2720,7 @@ jwk_set_t *jwks_create_strn(const char *jwk_json_str, const size_t len);
 /**
  * @brief Wrapper around jwks_load_fromfile() that explicitly creates a new
  *  keyring
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_create_fromfile(const char *file_name);
@@ -2026,6 +2728,7 @@ jwk_set_t *jwks_create_fromfile(const char *file_name);
 /**
  * @brief Wrapper around jwks_load_fromfp() that explicitly creates a new
  *  keyring
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_create_fromfp(FILE *input);
@@ -2033,9 +2736,69 @@ jwk_set_t *jwks_create_fromfp(FILE *input);
 /**
  * @brief Wrapper around jwks_load_fromurl() that explicitly creates a new
  *  keyring
+ * @since 3.2.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_create_fromurl(const char *url, int verify);
+
+/**
+ * @brief Configuration for a cached remote JWKS source
+ *
+ * Passed to jwks_load_fromurl_cached(). All fields may be 0 to take the
+ * defaults. @since 3.6.0
+ */
+typedef struct {
+	int verify;	/**< TLS verification: peer + host (0 = insecure)	*/
+	int ttl;	/**< Fallback cache lifetime in seconds when the
+			 *   server sends no ``Cache-Control: max-age``
+			 *   (<= 0 = a built-in default)			*/
+	int cooldown;	/**< Minimum seconds between forced (kid-miss)
+			 *   refreshes (< 0 = a built-in default)		*/
+} jwks_url_config_t;
+
+/**
+ * @brief Load a JWKS from a URL with caching, TTL, and conditional refresh
+ *
+ * A caching wrapper around the network fetch (only with libcurl). The keyring
+ * @p jwk_set holds the cache: on the first call it is fetched and stored; on a
+ * later call with the same @p jwk_set and @p url the cached keys are returned
+ * without a network request while they are still fresh. Freshness comes from
+ * the response ``Cache-Control: max-age`` if present, otherwise
+ * @ref jwks_url_config_t.ttl. Once stale, a conditional GET (``If-None-Match``
+ * with the stored ``ETag``) refreshes the cache; a ``304 Not Modified`` keeps
+ * the existing keys.
+ *
+ * Only ``http`` and ``https`` URLs are accepted (an SSRF guard; unlike
+ * jwks_load_fromurl(), which also allows ``file://``). On a refresh failure the
+ * previously cached keys are retained and the error is set on the keyring.
+ *
+ * @param jwk_set An existing cached keyring to reuse, or NULL to create one
+ * @param url The JWKS URL (``http``/``https``)
+ * @param config Cache configuration, or NULL for the defaults
+ * @return The keyring (cached or refreshed), or NULL on allocation failure or
+ *  when built without libcurl
+ * @since 3.6.0
+ */
+JWT_EXPORT
+jwk_set_t *jwks_load_fromurl_cached(jwk_set_t *jwk_set, const char *url,
+				    const jwks_url_config_t *config);
+
+/**
+ * @brief Force a refresh of a cached JWKS source (key rotation)
+ *
+ * Intended for an unknown-``kid`` (key rotation) miss: re-fetch the JWKS even if
+ * the cache is still fresh. The refresh is rate-limited by the cooldown
+ * configured in jwks_load_fromurl_cached() — within the cooldown window this is
+ * a no-op, which bounds outbound requests an attacker could trigger by
+ * presenting random ``kid`` values.
+ *
+ * @param jwk_set A keyring previously populated by jwks_load_fromurl_cached()
+ * @return The keyring (possibly refreshed); a keyring with no cache is returned
+ *  unchanged
+ * @since 3.6.0
+ */
+JWT_EXPORT
+jwk_set_t *jwks_refresh_fromurl(jwk_set_t *jwk_set);
 
 /**
  * @brief Flags controlling how a native key is imported into a keyring
@@ -2044,11 +2807,14 @@ jwk_set_t *jwks_create_fromurl(const char *url, int verify);
  * input to those functions may be a PEM file, a DER file, or (with
  * ::JWK_KEY_TRY_HMAC) raw bytes treated as an HMAC key, so these flags are
  * named JWK_KEY_* rather than anything PEM-specific.
+ * @since 3.4.0
  */
 typedef enum {
 	JWK_KEY_NONE		= 0x0000,	/**< No options */
-	JWK_KEY_GEN_KID		= 0x0001,	/**< Generate a random (uuidv4)
-						     "kid" for each imported key */
+	JWK_KEY_GEN_KID		= 0x0001,	/**< Generate a deterministic
+						     "kid" (the @rfc{7638} JWK
+						     SHA-256 thumbprint) for each
+						     imported key */
 	JWK_KEY_TRY_HMAC	= 0x0002,	/**< If the input does not parse
 						     as a PEM/DER key, treat the
 						     raw bytes as an "oct" (HMAC)
@@ -2075,6 +2841,7 @@ typedef enum {
  * @return A valid jwk_set_t on success. On failure, either NULL or a
  *   jwk_set_t with error set. NULL generally means ENOMEM or that the key
  *   could not be parsed.
+ * @since 3.4.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_load_fromkey(jwk_set_t *jwk_set, const char *key,
@@ -2091,6 +2858,7 @@ jwk_set_t *jwks_load_fromkey(jwk_set_t *jwk_set, const char *key,
  * @param flags A bitwise OR of ::jwk_key_flags_t values (or ::JWK_KEY_NONE).
  * @return A valid jwk_set_t on success. On failure, either NULL or a
  *   jwk_set_t with error set.
+ * @since 3.4.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_load_fromkey_file(jwk_set_t *jwk_set, const char *file_name,
@@ -2099,6 +2867,7 @@ jwk_set_t *jwks_load_fromkey_file(jwk_set_t *jwk_set, const char *file_name,
 /**
  * @brief Wrapper around jwks_load_fromkey() that explicitly creates a new
  *  keyring
+ * @since 3.4.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_create_fromkey(const char *key, const size_t len,
@@ -2107,9 +2876,58 @@ jwk_set_t *jwks_create_fromkey(const char *key, const size_t len,
 /**
  * @brief Wrapper around jwks_load_fromkey_file() that explicitly creates a new
  *  keyring
+ * @since 3.4.0
  */
 JWT_EXPORT
 jwk_set_t *jwks_create_fromkey_file(const char *file_name, unsigned int flags);
+
+/**
+ * @brief Generate a new key and add it to a keyring as a JWK
+ *
+ * Generates a fresh key of type @p kty and appends it to @p jwk_set as a new
+ * ::jwk_item_t (a private JWK), returning the set. Pass NULL for @p jwk_set to
+ * create a new keyring. The generated key is bound to the active crypto backend,
+ * so it can be used directly for signing/verifying or JWE.
+ *
+ * @p param selects the key geometry, interpreted by @p kty (NULL or "" picks a
+ * sensible default):
+ *  - EC: the curve — ``"P-256"`` (default), ``"P-384"``, ``"P-521"``, ``"secp256k1"``
+ *  - OKP: the curve — ``"Ed25519"`` (default), ``"Ed448"``, ``"X25519"``, ``"X448"``
+ *  - RSA: the modulus size in bits — ``"2048"`` (default), ``"3072"``, ``"4096"``
+ *  - oct: the key size in bits — ``"256"`` (default), ``"384"``, ``"512"``
+ *  - AKP (ML-DSA): ignored (the variant comes from @p alg)
+ *
+ * @p alg is the JWA discriminator. It is optional for EC/OKP/oct (it stamps the
+ * JWK ``"alg"``), distinguishes RSA (``RS*``) from RSA-PSS (``PS*``) for
+ * ``kty=RSA``, and is REQUIRED for AKP to pin the ML-DSA variant
+ * (``JWT_ALG_ML_DSA_44/65/87``). Pass ::JWT_ALG_NONE for none. It must be
+ * compatible with @p kty.
+ *
+ * @p flags is a bitwise OR of ::jwk_key_flags_t; ::JWK_KEY_GEN_KID stamps the
+ * RFC 7638 thumbprint as the ``"kid"``.
+ *
+ * A backend that cannot generate the requested key (e.g. MbedTLS has no EdDSA)
+ * does not crash: the appended item carries an error (jwks_item_error()).
+ *
+ * @param jwk_set A keyring to append to, or NULL to create a new one
+ * @param kty The key type to generate
+ * @param param The key geometry selector (see above), or NULL for the default
+ * @param alg The JWA algorithm discriminator, or ::JWT_ALG_NONE
+ * @param flags A bitwise OR of ::jwk_key_flags_t values (or ::JWK_KEY_NONE)
+ * @return The keyring with the new key appended, or NULL on allocation failure
+ * @since 3.6.0
+ */
+JWT_EXPORT
+jwk_set_t *jwks_generate(jwk_set_t *jwk_set, jwk_key_type_t kty,
+			 const char *param, jwt_alg_t alg, unsigned int flags);
+
+/**
+ * @brief Wrapper around jwks_generate() that explicitly creates a new keyring
+ * @since 3.6.0
+ */
+JWT_EXPORT
+jwk_set_t *jwks_create_generate(jwk_key_type_t kty, const char *param,
+				jwt_alg_t alg, unsigned int flags);
 
 /**
  * @brief Check if there is an error with a jwk_set
@@ -2122,6 +2940,7 @@ jwk_set_t *jwks_create_fromkey_file(const char *file_name, unsigned int flags);
  *
  * @param jwk_set An existing jwk_set_t
  * @return 0 if no error exists, 1 if it does exists.
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwks_error(const jwk_set_t *jwk_set);
@@ -2132,6 +2951,7 @@ int jwks_error(const jwk_set_t *jwk_set);
  *
  * @param jwk_set An existing jwk_set_t
  * @return 0 if no error exists, or the number of errors in the set
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwks_error_any(const jwk_set_t *jwk_set);
@@ -2143,6 +2963,7 @@ int jwks_error_any(const jwk_set_t *jwk_set);
  *
  * @param jwk_set An existing jwk_set_t
  * @return A string message. The string may be empty.
+ * @since 3.0.0
  */
 JWT_EXPORT
 const char *jwks_error_msg(const jwk_set_t *jwk_set);
@@ -2151,6 +2972,7 @@ const char *jwks_error_msg(const jwk_set_t *jwk_set);
  * @brief Clear an error condition in a jwk_set
  *
  * @param jwk_set An existing jwk_set_t
+ * @since 3.0.0
  */
 JWT_EXPORT
 void jwks_error_clear(jwk_set_t *jwk_set);
@@ -2160,17 +2982,19 @@ void jwks_error_clear(jwk_set_t *jwk_set);
  * the set.
  *
  * @param jwk_set An existing jwk_set_t
+ * @since 3.0.0
  */
 JWT_EXPORT
 void jwks_free(jwk_set_t *jwk_set);
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(__GNUC__) || defined(__clang__) || defined(_DOXYGEN)
 /**
  * @brief Helper function to free a JWK Set and set the pointer to NULL
  *
- * This is mainly to use with the jwt_set_auto_t type.
+ * This is mainly to use with the jwk_set_auto_t type.
  *
- * @param Pointer to a pointer for a jwt_set_t object
+ * @param Pointer to a pointer for a jwk_set_t object
+ * @since 3.0.0
  */
 static inline void jwks_freep(jwk_set_t **jwks) {
 	if (jwks) {
@@ -2178,6 +3002,15 @@ static inline void jwks_freep(jwk_set_t **jwks) {
 		*jwks = NULL;
 	}
 }
+/**
+ * @brief A jwk_set_t pointer that is freed automatically at scope exit
+ *
+ * Declares a jwk_set_t pointer carrying the GCC/Clang ``cleanup`` attribute
+ * so jwks_free() is invoked on it automatically when the variable goes out
+ * of scope. Initialize it where you declare it.
+ *
+ * @since 3.0.0
+ */
 #define jwk_set_auto_t jwk_set_t __attribute__((cleanup(jwks_freep)))
 #endif
 
@@ -2211,6 +3044,7 @@ static inline void jwks_freep(jwk_set_t **jwks) {
  * @warning The index of an item in a keyring can change if items are deleted.
  *  Effort is made to add new JWK to the end of the set, so this should not
  *  affect the index of previous items.
+ * @since 3.0.0
  */
 JWT_EXPORT
 const jwk_item_t *jwks_item_get(const jwk_set_t *jwk_set, size_t index);
@@ -2224,6 +3058,7 @@ const jwk_item_t *jwks_item_get(const jwk_set_t *jwk_set, size_t index);
  * @param jwk_set An existing jwk_set_t
  * @param kid String representing a ``kid`` to find
  * @return A jwk_item_t object or NULL if none found
+ * @since 3.2.0
  */
 JWT_EXPORT
 jwk_item_t *jwks_find_bykid(jwk_set_t *jwk_set, const char *kid);
@@ -2233,6 +3068,7 @@ jwk_item_t *jwks_find_bykid(jwk_set_t *jwk_set, const char *kid);
  *
  * @param item A JWK Item
  * @return 1 for true, 0 for false
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwks_item_is_private(const jwk_item_t *item);
@@ -2242,6 +3078,7 @@ int jwks_item_is_private(const jwk_item_t *item);
  *
  * @param item A JWK Item
  * @return 1 for true, 0 for false
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwks_item_error(const jwk_item_t *item);
@@ -2251,6 +3088,7 @@ int jwks_item_error(const jwk_item_t *item);
  *
  * @param item A JWK Item
  * @return A string message. Empty string if no error.
+ * @since 3.0.0
  */
 JWT_EXPORT
 const char *jwks_item_error_msg(const jwk_item_t *item);
@@ -2262,6 +3100,7 @@ const char *jwks_item_error_msg(const jwk_item_t *item);
  *
  * @param item A JWK Item
  * @return A string of the curve name if one exists. NULL otherwise.
+ * @since 3.0.0
  */
 JWT_EXPORT
 const char *jwks_item_curve(const jwk_item_t *item);
@@ -2271,6 +3110,7 @@ const char *jwks_item_curve(const jwk_item_t *item);
  *
  * @param item A JWK Item
  * @return A string of the kid if one exists. NULL otherwise.
+ * @since 3.0.0
  */
 JWT_EXPORT
 const char *jwks_item_kid(const jwk_item_t *item);
@@ -2282,6 +3122,7 @@ const char *jwks_item_kid(const jwk_item_t *item);
  *
  * @param item A JWK Item
  * @return A jwt_alg_t type of this key
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_alg_t jwks_item_alg(const jwk_item_t *item);
@@ -2291,6 +3132,7 @@ jwt_alg_t jwks_item_alg(const jwk_item_t *item);
  *
  * @param item A JWK Item
  * @return A jwk_key_type_t type for this key
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_key_type_t jwks_item_kty(const jwk_item_t *item);
@@ -2300,6 +3142,7 @@ jwk_key_type_t jwks_item_kty(const jwk_item_t *item);
  *
  * @param item A JWK Item
  * @return A jwk_pub_key_use_t type for this key
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_pub_key_use_t jwks_item_use(const jwk_item_t *item);
@@ -2310,6 +3153,7 @@ jwk_pub_key_use_t jwks_item_use(const jwk_item_t *item);
  * @param item A JWK Item
  * @return A jwk_key_op_t type for this key which represents all of the
  *   ``"key_ops"`` supported as a bit field.
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwk_key_op_t jwks_item_key_ops(const jwk_item_t *item);
@@ -2322,9 +3166,66 @@ jwk_key_op_t jwks_item_key_ops(const jwk_item_t *item);
  *
  * @param item A JWK Item
  * @return A string of the PEM file for this key or NULL if none exists
+ * @since 3.0.0
  */
 JWT_EXPORT
 const char *jwks_item_pem(const jwk_item_t *item);
+
+/**
+ * @brief Number of certificates in the JWK ``x5c`` chain
+ *
+ * @param item A JWK Item
+ * @return The number of X.509 certificates in the ``x5c`` chain, or 0 if the
+ *  JWK has none (RFC 7517 §4.7).
+ * @since 3.6.0
+ */
+JWT_EXPORT
+size_t jwks_item_x5c_count(const jwk_item_t *item);
+
+/**
+ * @brief Get a certificate from the JWK ``x5c`` chain (DER)
+ *
+ * Returns the raw DER bytes of the certificate at @p index in the ``x5c``
+ * chain (index 0 is the leaf, which holds the public key matching the JWK).
+ * The bytes are owned by the JWK item and remain valid until it is freed; the
+ * caller must not free them. Certificate-chain validation is the caller's
+ * responsibility (libjwt does not build or verify the trust chain).
+ *
+ * @param item A JWK Item
+ * @param index The certificate index (0 is the leaf)
+ * @param len If not NULL, set to the length of the DER in bytes
+ * @return The DER bytes, or NULL if @p index is out of range
+ * @since 3.6.0
+ */
+JWT_EXPORT
+const unsigned char *jwks_item_x5c(const jwk_item_t *item, size_t index,
+				   size_t *len);
+
+/**
+ * @brief The JWK ``x5t`` (SHA-1 certificate thumbprint)
+ *
+ * @param item A JWK Item
+ * @return The base64url ``x5t`` value (RFC 7517 §4.8), or NULL if absent. The
+ *  legacy SHA-1 thumbprint is exposed as-is and not recomputed.
+ * @since 3.6.0
+ */
+JWT_EXPORT
+const char *jwks_item_x5t(const jwk_item_t *item);
+
+/**
+ * @brief The JWK ``x5t#S256`` (SHA-256 certificate thumbprint)
+ *
+ * If the JWK also carries an ``x5c`` chain, this value was verified at parse
+ * time to equal ``base64url(SHA-256(DER(leaf)))`` (RFC 7517 §4.9); a JWK whose
+ * ``x5t#S256`` disagrees with its ``x5c`` leaf is rejected (the item carries an
+ * error).
+ *
+ * @param item A JWK Item
+ * @return The base64url ``x5t#S256`` value, or NULL if absent
+ * @since 3.6.0
+ */
+JWT_EXPORT
+const char *jwks_item_x5t_s256(const jwk_item_t *item);
 
 /**
  * @brief Serialize a single JWK item to a JWK JSON string
@@ -2337,6 +3238,7 @@ const char *jwks_item_pem(const jwk_item_t *item);
  *   private key. If zero, only public parameters are emitted.
  * @return A newly allocated, nil-terminated JSON string the caller must free
  *   with free(), or NULL on error.
+ * @since 3.4.0
  */
 JWT_EXPORT
 char *jwks_item_export(const jwk_item_t *item, int priv);
@@ -2352,9 +3254,92 @@ char *jwks_item_export(const jwk_item_t *item, int priv);
  *   zero, only public parameters are emitted.
  * @return A newly allocated, nil-terminated JSON string the caller must free
  *   with free(), or NULL on error.
+ * @since 3.4.0
  */
 JWT_EXPORT
 char *jwks_export(const jwk_set_t *jwk_set, int priv);
+
+/**
+ * @brief Compute the JWK Thumbprint of a key
+ *
+ * @rfc{7638,3}
+ *
+ * Produces the base64url-encoded SHA-2 digest of the key's canonical JWK form:
+ * a JSON object containing only the members required for the key type, with no
+ * whitespace and the member names in lexicographic order. The result is a
+ * stable, deterministic fingerprint of the (public) key parameters, commonly
+ * used as a key id (@c "kid") or as the @c "jkt" confirmation value.
+ *
+ * The thumbprint is computed over public parameters and is identical whether
+ * the item was loaded from a JWK or from a PEM/DER key.
+ *
+ * @param item A JWK Item
+ * @param alg The thumbprint hash algorithm (see @ref jwk_thumbprint_alg_t);
+ *   @ref JWK_THUMBPRINT_SHA256 is the default.
+ * @return A newly allocated, nil-terminated base64url string the caller must
+ *   free with free(), or NULL on error (an unusable key, a missing required
+ *   member, or an invalid @p alg).
+ * @since 3.6.0
+ */
+JWT_EXPORT
+char *jwks_item_thumbprint(const jwk_item_t *item, jwk_thumbprint_alg_t alg);
+
+/**
+ * @brief Compute the JWK Thumbprint URI of a key
+ *
+ * @rfc{9278}
+ *
+ * As jwks_item_thumbprint(), but returns the RFC 9278 URI form:
+ * @c "urn:ietf:params:oauth:jwk-thumbprint:sha-256:<thumbprint>" (or
+ * @c sha-384 / @c sha-512 to match @p alg).
+ *
+ * @param item A JWK Item
+ * @param alg The thumbprint hash algorithm (see @ref jwk_thumbprint_alg_t);
+ *   @ref JWK_THUMBPRINT_SHA256 is the default.
+ * @return A newly allocated, nil-terminated URI string the caller must free
+ *   with free(), or NULL on error.
+ * @since 3.6.0
+ */
+JWT_EXPORT
+char *jwks_item_thumbprint_uri(const jwk_item_t *item, jwk_thumbprint_alg_t alg);
+
+/**
+ * @brief Find a key in a set by its JWK Thumbprint
+ *
+ * @rfc{7638}
+ *
+ * Returns the first item in @p jwk_set whose thumbprint (for the given hash)
+ * equals @p thumbprint. Unlike jwks_find_bykid(), this matches on the key's
+ * canonical, deterministic identity rather than the advisory @c "kid", so it
+ * works even when keys carry no (or an inconsistent) @c "kid" — e.g. matching a
+ * proof-of-possession @c "cnf"/@c "jkt" value against a set of known keys.
+ *
+ * @param jwk_set An existing jwk_set_t
+ * @param alg The hash used to produce @p thumbprint (see @ref jwk_thumbprint_alg_t)
+ * @param thumbprint A base64url JWK thumbprint, as from jwks_item_thumbprint()
+ * @return The matching jwk_item_t, or NULL if none matches or on bad input
+ * @since 3.6.0
+ */
+JWT_EXPORT
+jwk_item_t *jwks_find_bythumbprint(jwk_set_t *jwk_set, jwk_thumbprint_alg_t alg,
+				   const char *thumbprint);
+
+/**
+ * @brief Find a key in a set by its JWK Thumbprint URI
+ *
+ * @rfc{9278}
+ *
+ * As jwks_find_bythumbprint(), but takes the RFC 9278 URI form
+ * (@c "urn:ietf:params:oauth:jwk-thumbprint:sha-256:<thumbprint>"); the hash
+ * is taken from the URI's @c sha-NNN label.
+ *
+ * @param jwk_set An existing jwk_set_t
+ * @param uri A JWK Thumbprint URI, as from jwks_item_thumbprint_uri()
+ * @return The matching jwk_item_t, or NULL if none matches or on bad input
+ * @since 3.6.0
+ */
+JWT_EXPORT
+jwk_item_t *jwks_find_bythumbprint_uri(jwk_set_t *jwk_set, const char *uri);
 
 /**
  * @brief Retrieve binary octet data of a key
@@ -2366,6 +3351,7 @@ char *jwks_export(const jwk_set_t *jwk_set, int priv);
  * @param len Pointer to a length
  * @return 0 on success. @p buf will point to data of @c len length. Non-zero on
  *  error.
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwks_item_key_oct(const jwk_item_t *item, const unsigned char **buf,
@@ -2379,6 +3365,7 @@ int jwks_item_key_oct(const jwk_item_t *item, const unsigned char **buf,
  *
  * @param item A JWK Item
  * @return The number of bits for the key
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwks_item_key_bits(const jwk_item_t *item);
@@ -2389,6 +3376,7 @@ int jwks_item_key_bits(const jwk_item_t *item);
  * @param jwk_set Pointer to a JWKS object
  * @param index the position of the item in the index
  * @return 0 if no item was was deleted (found), 1 if it was
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwks_item_free(jwk_set_t *jwk_set, size_t index);
@@ -2400,6 +3388,7 @@ int jwks_item_free(jwk_set_t *jwk_set, size_t index);
  *
  * @param jwk_set Pointer to a JWKS object
  * @return The number of items deleted
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwks_item_free_all(jwk_set_t *jwk_set);
@@ -2411,6 +3400,7 @@ int jwks_item_free_all(jwk_set_t *jwk_set);
  *
  * @param jwk_set Pointer to a JWKS object
  * @return The number of items with an error that were deleted
+ * @since 3.1.0
  */
 JWT_EXPORT
 int jwks_item_free_bad(jwk_set_t *jwk_set);
@@ -2420,6 +3410,7 @@ int jwks_item_free_bad(jwk_set_t *jwk_set);
  *
  * @param jwk_set Pointer to a JWKS object
  * @return The number of items in the set
+ * @since 3.1.0
  */
 JWT_EXPORT
 size_t jwks_item_count(const jwk_set_t *jwk_set);
@@ -2471,6 +3462,7 @@ size_t jwks_item_count(const jwk_set_t *jwk_set);
   * @param pfree The function to use for freeing memory or
   *     NULL to use free
   * @returns 0 on success or errno otherwise.
+  * @since 3.0.0
   */
 JWT_EXPORT
 int jwt_set_alloc(jwt_malloc_t pmalloc, jwt_free_t pfree);
@@ -2480,6 +3472,7 @@ int jwt_set_alloc(jwt_malloc_t pmalloc, jwt_free_t pfree);
  *
  * @param pmalloc Pointer to malloc function output variable, or NULL
  * @param pfree Pointer to free function output variable, or NULL
+ * @since 3.0.0
  */
 JWT_EXPORT
 void jwt_get_alloc(jwt_malloc_t *pmalloc, jwt_free_t *pfree);
@@ -2516,6 +3509,7 @@ void jwt_get_alloc(jwt_malloc_t *pmalloc, jwt_free_t *pfree);
  * Retrieve the name of the current crypto operations being used.
  *
  * @return name of the crypto operation set
+ * @since 3.0.0
  */
 JWT_EXPORT
 const char *jwt_get_crypto_ops(void);
@@ -2524,6 +3518,7 @@ const char *jwt_get_crypto_ops(void);
  * Retrieve the type of the current crypto operations being used.
  *
  * @return jwt_crypto_provider_t of the crypto operation set
+ * @since 3.0.0
  */
 JWT_EXPORT
 jwt_crypto_provider_t jwt_get_crypto_ops_t(void);
@@ -2534,8 +3529,15 @@ jwt_crypto_provider_t jwt_get_crypto_ops_t(void);
  * The opname is one of the available operators in the compiled version
  * of LibJWT. Most times, this is either "openssl" or "gnutls".
  *
+ * @note A key (@ref jwk_item_t) remains bound to the backend that parsed it:
+ *  signing, verifying, and JWE operations on that key always route to its
+ *  origin backend, regardless of the backend selected here. So changing the
+ *  active backend after loading keys is safe — each key keeps working. (Keys
+ *  with no backend-specific material, i.e. @c "oct", use the active backend.)
+ *
  * @param opname the name of the crypto operation to set
  * @return 0 on success, 1 for error
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_set_crypto_ops(const char *opname);
@@ -2547,6 +3549,7 @@ int jwt_set_crypto_ops(const char *opname);
  *
  * @param opname A valid jwt_crypto_provider_t type
  * @return 0 on success, 1 for error
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_set_crypto_ops_t(jwt_crypto_provider_t opname);
@@ -2555,6 +3558,7 @@ int jwt_set_crypto_ops_t(jwt_crypto_provider_t opname);
  * Check if the current crypto operations support JWK usage
  *
  * @return 1 if it does, 0 if not
+ * @since 3.0.0
  */
 JWT_EXPORT
 int jwt_crypto_ops_supports_jwk(void);

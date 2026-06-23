@@ -150,9 +150,11 @@ int jwe_ecdh_derive(jwe_key_alg_t alg, jwe_enc_t enc, const jwk_item_t *key,
 		    int for_encrypt, jwt_json_t *hdr,
 		    unsigned char **dk, size_t *dk_len)
 {
-	if (jwt_ops->ecdh_derive == NULL)
+	struct jwt_crypto_ops *ops = jwt_item_ops(key);
+
+	if (ops == NULL || ops->ecdh_derive == NULL)
 		return 1; // LCOV_EXCL_LINE
-	return jwt_ops->ecdh_derive(alg, enc, key, for_encrypt, hdr, dk, dk_len);
+	return ops->ecdh_derive(alg, enc, key, for_encrypt, hdr, dk, dk_len);
 }
 
 /* @rfc{7518,4.4} AES Key Wrap / Unwrap with a raw KEK (the ECDH-ES agreed
@@ -185,10 +187,12 @@ int jwe_encrypt_cek(jwe_key_alg_t alg, const jwk_item_t *key,
 		return jwe_wrap_cek(alg, key, cek, cek_len, out, out_len);
 
 	if (alg_is_rsa(alg)) {
-		if (jwt_ops->encrypt_cek_rsa == NULL)
+		struct jwt_crypto_ops *ops = jwt_item_ops(key);
+
+		if (ops == NULL || ops->encrypt_cek_rsa == NULL)
 			return 1; // LCOV_EXCL_LINE
-		return jwt_ops->encrypt_cek_rsa(alg, key, cek, cek_len,
-						out, out_len);
+		return ops->encrypt_cek_rsa(alg, key, cek, cek_len,
+					    out, out_len);
 	}
 
 	return 1; // LCOV_EXCL_LINE
@@ -205,10 +209,12 @@ int jwe_decrypt_cek(jwe_key_alg_t alg, const jwk_item_t *key,
 		return jwe_unwrap_cek(alg, key, in, in_len, cek, cek_len);
 
 	if (alg_is_rsa(alg)) {
-		if (jwt_ops->decrypt_cek_rsa == NULL)
+		struct jwt_crypto_ops *ops = jwt_item_ops(key);
+
+		if (ops == NULL || ops->decrypt_cek_rsa == NULL)
 			return 1; // LCOV_EXCL_LINE
-		return jwt_ops->decrypt_cek_rsa(alg, key, in, in_len,
-						cek, cek_len);
+		return ops->decrypt_cek_rsa(alg, key, in, in_len,
+					    cek, cek_len);
 	}
 
 	return 1; // LCOV_EXCL_LINE
@@ -274,6 +280,315 @@ int jwe_decrypt_content(jwe_enc_t enc, const unsigned char *cek,
 		aad, aad_len, ct, ct_len, tag, tag_len, pt, pt_len);
 }
 
+/* @rfc{7518,4.7} Is this an AES-GCM key-wrap algorithm? */
+int jwe_alg_is_gcmkw(jwe_key_alg_t alg)
+{
+	return alg == JWE_ALG_A128GCMKW || alg == JWE_ALG_A192GCMKW ||
+	       alg == JWE_ALG_A256GCMKW;
+}
+
+/* @rfc{7518,4.7} The KEK oct length a GCM-KW alg requires. */
+static size_t gcmkw_kek_len(jwe_key_alg_t alg)
+{
+	switch (alg) {
+	case JWE_ALG_A128GCMKW:
+		return 16;
+	case JWE_ALG_A192GCMKW:
+		return 24;
+	case JWE_ALG_A256GCMKW:
+		return 32;
+	// LCOV_EXCL_START
+	default:
+		return 0;
+	// LCOV_EXCL_STOP
+	}
+}
+
+/* The GCM content-encryption "enc" whose AES key size matches a GCM-KW alg, so
+ * the existing GCM code can wrap/unwrap the CEK. */
+static jwe_enc_t gcmkw_to_enc(jwe_key_alg_t alg)
+{
+	switch (alg) {
+	case JWE_ALG_A128GCMKW:
+		return JWE_ENC_A128GCM;
+	case JWE_ALG_A192GCMKW:
+		return JWE_ENC_A192GCM;
+	case JWE_ALG_A256GCMKW:
+		return JWE_ENC_A256GCM;
+	// LCOV_EXCL_START
+	default:
+		return JWE_ENC_INVAL;
+	// LCOV_EXCL_STOP
+	}
+}
+
+/* @rfc{7518,4.7} AES-GCM key wrap: GCM-encrypt the CEK under the oct KEK with a
+ * FRESH 96-bit IV and an empty AAD. The wrapped CEK is the Encrypted Key (@out);
+ * the 96-bit IV and 128-bit tag are written base64url into @hdr as "iv"/"tag".
+ * A fresh CSPRNG IV per wrap is mandatory (RFC 7518 8.7: nonce reuse under the
+ * same KEK is a catastrophic GCM break) — the IV is generated here and is never
+ * caller-supplied. Returns 0 on success. */
+int jwe_gcmkw_wrap(jwe_key_alg_t alg, const jwk_item_t *key,
+		   const unsigned char *cek, size_t cek_len,
+		   jwt_json_t *hdr, unsigned char **out, size_t *out_len)
+{
+	jwe_enc_t enc = gcmkw_to_enc(alg);
+	const unsigned char *k;
+	unsigned char iv[12], *tag = NULL;
+	char *iv_b64 = NULL, *tag_b64 = NULL;
+	size_t klen = 0, tag_len = 0;
+	int ret = 1;
+
+	if (jwks_item_key_oct(key, &k, &klen) || klen != gcmkw_kek_len(alg))
+		return 1;
+
+	if (jwt_ops->rng == NULL || jwt_ops->rng(iv, sizeof(iv)))
+		return 1; // LCOV_EXCL_LINE
+
+	if (jwe_encrypt_content(enc, k, klen, iv, sizeof(iv), NULL, 0,
+				cek, cek_len, out, out_len, &tag, &tag_len))
+		goto out; // LCOV_EXCL_LINE
+
+	if (jwt_base64uri_encode(&iv_b64, (char *)iv, (int)sizeof(iv)) <= 0 ||
+	    jwt_base64uri_encode(&tag_b64, (char *)tag, (int)tag_len) <= 0)
+		goto out; // LCOV_EXCL_LINE
+
+	if (jwt_json_obj_set(hdr, "iv", jwt_json_create_str(iv_b64)) ||
+	    jwt_json_obj_set(hdr, "tag", jwt_json_create_str(tag_b64)))
+		goto out; // LCOV_EXCL_LINE
+
+	ret = 0;
+
+out:
+	jwt_freemem(tag);
+	jwt_freemem(iv_b64);
+	jwt_freemem(tag_b64);
+	if (ret) {
+		// LCOV_EXCL_START
+		jwt_freemem(*out);
+		*out_len = 0;
+		// LCOV_EXCL_STOP
+	}
+
+	return ret;
+}
+
+/* @rfc{7518,4.7} AES-GCM key unwrap: read the "iv"/"tag" from @hdr and
+ * GCM-decrypt the Encrypted Key under the oct KEK (empty AAD) to recover the
+ * CEK. jwe_decrypt_content enforces the 96-bit IV and verifies the tag, so a
+ * bad tag fails here; per RFC 7516 11.5 the caller then substitutes a random
+ * CEK. Returns 0 on success. */
+int jwe_gcmkw_unwrap(jwe_key_alg_t alg, const jwk_item_t *key, jwt_json_t *hdr,
+		     const unsigned char *in, size_t in_len,
+		     unsigned char **cek, size_t *cek_len)
+{
+	jwe_enc_t enc = gcmkw_to_enc(alg);
+	jwt_json_t *jiv, *jtag;
+	const unsigned char *k;
+	unsigned char *iv = NULL, *tag = NULL;
+	size_t klen = 0;
+	int iv_len = 0, tag_len = 0, ret = 1;
+
+	if (jwks_item_key_oct(key, &k, &klen) || klen != gcmkw_kek_len(alg))
+		return 1;
+
+	jiv = jwt_json_obj_get(hdr, "iv");
+	jtag = jwt_json_obj_get(hdr, "tag");
+	if (jiv == NULL || !jwt_json_is_string(jiv) ||
+	    jtag == NULL || !jwt_json_is_string(jtag))
+		return 1;
+
+	iv = jwt_base64uri_decode(jwt_json_str_val(jiv), &iv_len);
+	tag = jwt_base64uri_decode(jwt_json_str_val(jtag), &tag_len);
+	if (iv == NULL || tag == NULL || iv_len <= 0 || tag_len <= 0)
+		goto out;
+
+	if (jwe_decrypt_content(enc, k, klen, iv, iv_len, NULL, 0,
+				in, in_len, tag, tag_len, cek, cek_len))
+		goto out;
+
+	ret = 0;
+
+out:
+	jwt_freemem(iv);
+	jwt_freemem(tag);
+
+	return ret;
+}
+
+/* @rfc{7518,4.8} PBES2 password-based key management. */
+#define PBES2_SALT_LEN		16	/* p2s octets generated on encrypt */
+#define PBES2_SALT_MIN		8	/* @rfc{7518,4.8.1.1} minimum p2s octets */
+#define PBES2_DEFAULT_P2C	310000	/* iterations when the builder sets none */
+#define PBES2_MAX_P2C		1000000	/* hard cap on decrypt (attacker DoS guard) */
+
+int jwe_alg_is_pbes2(jwe_key_alg_t alg)
+{
+	return alg == JWE_ALG_PBES2_HS256_A128KW ||
+	       alg == JWE_ALG_PBES2_HS384_A192KW ||
+	       alg == JWE_ALG_PBES2_HS512_A256KW;
+}
+
+/* The PBKDF2 hash size and derived/KEK length (= the AES-KW key size). */
+static void pbes2_params(jwe_key_alg_t alg, int *sha_bits, size_t *kek_len)
+{
+	switch (alg) {
+	case JWE_ALG_PBES2_HS256_A128KW:
+		*sha_bits = 256;
+		*kek_len = 16;
+		break;
+	case JWE_ALG_PBES2_HS384_A192KW:
+		*sha_bits = 384;
+		*kek_len = 24;
+		break;
+	case JWE_ALG_PBES2_HS512_A256KW:
+		*sha_bits = 512;
+		*kek_len = 32;
+		break;
+	// LCOV_EXCL_START
+	default:
+		*sha_bits = 0;
+		*kek_len = 0;
+		break;
+	// LCOV_EXCL_STOP
+	}
+}
+
+/* @rfc{7518,4.8.1.1} Derive the KEK: PBKDF2 over the salt input
+ * (UTF8(alg) || 0x00 || p2s). Returns 0 on success, dk holds @kek_len octets. */
+static int pbes2_derive(jwe_key_alg_t alg, int sha_bits, size_t kek_len,
+			const unsigned char *pw, size_t pw_len,
+			const unsigned char *p2s, size_t p2s_len,
+			unsigned int p2c, unsigned char *dk)
+{
+	const char *alg_name = jwe_alg_str(alg);
+	size_t alg_len = strlen(alg_name);
+	size_t salt_len = alg_len + 1 + p2s_len;
+	unsigned char *salt;
+	int ret;
+
+	if (jwt_ops->pbkdf2 == NULL)
+		return 1;
+
+	salt = jwt_malloc(salt_len);
+	if (salt == NULL)
+		return 1; // LCOV_EXCL_LINE
+	memcpy(salt, alg_name, alg_len);
+	salt[alg_len] = 0x00;
+	memcpy(salt + alg_len + 1, p2s, p2s_len);
+
+	ret = jwt_ops->pbkdf2(sha_bits, pw, pw_len, salt, salt_len, p2c, dk,
+			      kek_len);
+	jwt_freemem(salt);
+
+	return ret;
+}
+
+/* @rfc{7518,4.8} Wrap the CEK to a password: derive a KEK with PBKDF2 over a
+ * fresh salt and AES-KW-wrap the CEK, writing "p2s"/"p2c" into @hdr. The salt is
+ * generated here (never caller-supplied). Returns 0 on success. */
+int jwe_pbes2_wrap(jwe_key_alg_t alg, const jwk_item_t *key,
+		   const unsigned char *cek, size_t cek_len, unsigned int p2c,
+		   jwt_json_t *hdr, unsigned char **out, size_t *out_len)
+{
+	unsigned char p2s[PBES2_SALT_LEN], dk[32];
+	const unsigned char *pw;
+	char *p2s_b64 = NULL;
+	size_t pw_len = 0, kek_len;
+	int sha_bits, ret = 1;
+
+	pbes2_params(alg, &sha_bits, &kek_len);
+
+	/* The password is the oct key's octets. */
+	if (jwks_item_key_oct(key, &pw, &pw_len) || pw == NULL || pw_len == 0)
+		return 1;
+
+	if (p2c == 0)
+		p2c = PBES2_DEFAULT_P2C;
+
+	if (jwt_ops->rng == NULL || jwt_ops->rng(p2s, sizeof(p2s)))
+		return 1; // LCOV_EXCL_LINE
+
+	if (pbes2_derive(alg, sha_bits, kek_len, pw, pw_len, p2s, sizeof(p2s),
+			 p2c, dk))
+		goto out; // LCOV_EXCL_LINE
+
+	if (jwe_aeskw_wrap_raw(dk, kek_len, cek, cek_len, out, out_len))
+		goto out; // LCOV_EXCL_LINE
+
+	if (jwt_base64uri_encode(&p2s_b64, (char *)p2s, (int)sizeof(p2s)) <= 0)
+		goto out; // LCOV_EXCL_LINE
+
+	if (jwt_json_obj_set(hdr, "p2s", jwt_json_create_str(p2s_b64)) ||
+	    jwt_json_obj_set(hdr, "p2c", jwt_json_create_int((jwt_json_int_t)p2c)))
+		goto out; // LCOV_EXCL_LINE
+
+	ret = 0;
+
+out:
+	jwt_cleanse(dk, sizeof(dk));
+	jwt_freemem(p2s_b64);
+	if (ret) {
+		// LCOV_EXCL_START
+		jwt_freemem(*out);
+		*out_len = 0;
+		// LCOV_EXCL_STOP
+	}
+
+	return ret;
+}
+
+/* @rfc{7518,4.8} Recover the CEK from a password: read "p2s"/"p2c" from @hdr,
+ * enforce the iteration cap and minimum salt, derive the KEK and AES-KW-unwrap.
+ * A wrong password / bad wrap fails here; the caller substitutes a random CEK. */
+int jwe_pbes2_unwrap(jwe_key_alg_t alg, const jwk_item_t *key, jwt_json_t *hdr,
+		     const unsigned char *in, size_t in_len,
+		     unsigned char **cek, size_t *cek_len)
+{
+	unsigned char dk[32], *p2s = NULL;
+	const unsigned char *pw;
+	jwt_json_t *jp2s, *jp2c;
+	size_t pw_len = 0, kek_len;
+	jwt_json_int_t p2c;
+	int sha_bits, p2s_len = 0, ret = 1;
+
+	pbes2_params(alg, &sha_bits, &kek_len);
+
+	if (jwks_item_key_oct(key, &pw, &pw_len) || pw == NULL || pw_len == 0)
+		return 1;
+
+	jp2s = jwt_json_obj_get(hdr, "p2s");
+	jp2c = jwt_json_obj_get(hdr, "p2c");
+	if (jp2s == NULL || !jwt_json_is_string(jp2s) ||
+	    jp2c == NULL || !jwt_json_is_int(jp2c))
+		return 1;
+
+	/* @rfc{7518,4.8.1.2} The iteration count is attacker-controlled: cap it
+	 * (DoS) and require a sufficiently long salt BEFORE doing any PBKDF2. */
+	p2c = jwt_json_int_val(jp2c);
+	if (p2c < 1 || p2c > PBES2_MAX_P2C)
+		return 1;
+
+	p2s = jwt_base64uri_decode(jwt_json_str_val(jp2s), &p2s_len);
+	if (p2s == NULL || p2s_len < PBES2_SALT_MIN)
+		goto out;
+
+	if (pbes2_derive(alg, sha_bits, kek_len, pw, pw_len, p2s,
+			 (size_t)p2s_len, (unsigned int)p2c, dk))
+		goto out; // LCOV_EXCL_LINE
+
+	if (jwe_aeskw_unwrap_raw(dk, kek_len, in, in_len, cek, cek_len))
+		goto out;
+
+	ret = 0;
+
+out:
+	jwt_cleanse(dk, sizeof(dk));
+	jwt_freemem(p2s);
+
+	return ret;
+}
+
 /* @rfc{7516,11.4} @rfc{7517,4.2,4.3} Gate a JWK against a JWE key management
  * algorithm. */
 const char *jwe_key_usage_check(const jwk_item_t *key, jwe_key_alg_t alg,
@@ -327,6 +642,12 @@ const char *jwe_key_usage_check(const jwk_item_t *key, jwe_key_alg_t alg,
 		case JWE_ALG_A128KW:
 		case JWE_ALG_A192KW:
 		case JWE_ALG_A256KW:
+		case JWE_ALG_A128GCMKW:
+		case JWE_ALG_A192GCMKW:
+		case JWE_ALG_A256GCMKW:
+		case JWE_ALG_PBES2_HS256_A128KW:
+		case JWE_ALG_PBES2_HS384_A192KW:
+		case JWE_ALG_PBES2_HS512_A256KW:
 			want = for_encrypt ? JWK_KEY_OP_WRAP : JWK_KEY_OP_UNWRAP;
 			break;
 		case JWE_ALG_RSA_OAEP:

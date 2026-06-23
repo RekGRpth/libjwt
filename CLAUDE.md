@@ -41,6 +41,16 @@ commit/PR/tag (`git show v3.5.0`, PR #304) when in doubt.
    - Any symbol removed or changed -> `current++, revision=0, age=0` (SONAME-major
      break). SONAME major = `current - age`, and has stayed `14` across all of 3.x.
 
+   The **same** symbol/enum/macro diff also drives the Doxygen `@since` tags in
+   `include/jwt.h` — maintain them in this same review (the baseline
+   `@since 3.0.0`..`3.5.0` pass was PR #305). Anything new at the release — a
+   function, typedef/enum/struct, enum value, documented macro, or
+   `*_freep`/`*_auto_t` helper — must carry `@since X.Y.Z` for the version being
+   released. Note the asymmetry with the triple: new enum values and `#cmakedefine`
+   macros are **not** linker symbols (so they don't move `current`/`age`) but they
+   **still** need `@since` — e.g. v3.5.0's `JWT_ALG_ML_DSA_*` / `JWK_KEY_TYPE_AKP`
+   are `@since 3.5.0` despite the revision-only bump.
+
 2. **Branch + commit** — `release-X.Y.Z` off master; edit **only**
    `LibJWTVersions.cmake` (plus any now-stale doc note, as v3.4.0 dropped the "v3
    overhaul" warning). `git commit -s` titled `Release vX.Y.Z` with a body documenting
@@ -152,7 +162,7 @@ box-character blob); do not revert it.
 
 The library has two key abstraction interfaces that allow swapping implementations:
 
-1. **Crypto backend abstraction** (`jwt-crypto-ops.c`, `jwt-private.h:jwt_crypto_ops`): Each crypto provider (OpenSSL, GnuTLS, MBedTLS) implements the `jwt_crypto_ops` struct with function pointers for sign/verify, JWK parsing (`process_*`), and native-key→JWK conversion (`key2jwk_params`, assembled by the common `jwk-export.c`). All three backends are optional and interchangeable; the build requires at least one but works with any combination (default `WITH_OPENSSL=ON`). A GnuTLS-only build (no OpenSSL) requires GnuTLS >= 3.8.4, since older GnuTLS has no native JWK/JWE path and falls back to OpenSSL. The MbedTLS backend targets the MbedTLS **3.6.x LTS** API (`mbedcrypto>=3.6.0`); MbedTLS **4.x will not build** — its PSA rewrite drops the legacy `mbedtls_pk_*` API the backend uses — so pin 3.6.x (the CI image builds it from source for this reason). The active provider is selected at runtime via `jwt_set_crypto_ops()`; the default is the first compiled backend (OpenSSL > GnuTLS > MBedTLS).
+1. **Crypto backend abstraction** (`jwt-crypto-ops.c`, `jwt-private.h:jwt_crypto_ops`): Each crypto provider (OpenSSL, GnuTLS, MBedTLS) implements the `jwt_crypto_ops` struct with function pointers for sign/verify, JWK parsing (`process_*`), and native-key→JWK conversion (`key2jwk_params`, assembled by the common `jwk-export.c`). All three backends are optional and interchangeable; the build requires at least one but works with any combination (default `WITH_OPENSSL=ON`). A GnuTLS-only build (no OpenSSL) requires GnuTLS >= 3.8.4, since older GnuTLS has no native JWK/JWE path and falls back to OpenSSL. The MbedTLS backend uses **PSA Crypto** (`psa/crypto.h`), which is present in both MbedTLS **3.6.x LTS** and **4.x**, so it builds against either (`mbedcrypto>=3.6.0`) — verified building + passing the suite against 4.1.0, and there are `#if MBEDTLS_VERSION_MAJOR >= 4` paths in `mbedtls/jwk-export.c`. The CI image pins 3.6.x LTS (built from source) as the tested baseline, a deliberate choice rather than a build limitation. The active provider is selected at runtime via `jwt_set_crypto_ops()`; the default is the first compiled backend (OpenSSL > GnuTLS > MBedTLS).
 
 2. **JSON backend abstraction** (`jwt-json-ops.h`): Jansson and json-c each implement the same JSON operations interface. Selected at compile time via `WITH_JSON_C`.
 

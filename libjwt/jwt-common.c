@@ -42,6 +42,36 @@ void FUNC(free)(jwt_common_t *__cmd)
 		jwt_freemem(__cmd->c.understood);
 	}
 
+	/* @rfc{7515,7.2} Drain the signature list (empty on the compact path). */
+	if (__cmd->c.signatures.next != NULL) {
+		struct jwt_signature *s, *tmp;
+
+		list_for_each_entry_safe(s, tmp, &__cmd->c.signatures, node) {
+			list_del(&s->node);
+			jwt_signature_free(s);
+		}
+	}
+
+	/* @rfc{7797} Free any raw payload (jwt_builder_setpayload()). */
+	jwt_scrub_and_free(__cmd->c.payload_raw, __cmd->c.payload_raw_len);
+
+	/* @rfc{8725} Free the checker's typ expectation / algorithm allowlist. */
+	jwt_freemem(__cmd->c.expected_typ);
+	jwt_freemem(__cmd->c.alg_allowlist);
+
+	/* @rfc{9068} Free the required-claims list (the embedded_keyring is
+	 * borrowed, like the verify keyring, so it is never freed here). */
+	if (__cmd->c.require != NULL) {
+		size_t i;
+
+		for (i = 0; i < __cmd->c.n_require; i++)
+			jwt_freemem(__cmd->c.require[i]);
+		jwt_freemem(__cmd->c.require);
+	}
+	jwt_freemem(__cmd->c.embedded_jkt);
+	if (__cmd->c.embedded_owned != NULL)
+		jwks_free(__cmd->c.embedded_owned);
+
 	memset(__cmd, 0, sizeof(*__cmd));
 
 	jwt_freemem(__cmd);
@@ -55,6 +85,13 @@ jwt_common_t *FUNC(new)(void)
 		return NULL; // LCOV_EXCL_LINE
 
 	memset(__cmd, 0, sizeof(*__cmd));
+
+	/* @rfc{7515,7.2} The signature list is empty until setkey/add_signature
+	 * (builder) or the JSON parse (checker) materializes it. */
+	INIT_LIST_HEAD(&__cmd->c.signatures);
+
+	/* @rfc{7797} base64url payloads by default (b64=true). */
+	__cmd->c.b64 = 1;
 
 	__cmd->c.payload = jwt_json_create();
 	__cmd->c.headers = jwt_json_create();
@@ -129,6 +166,29 @@ int FUNC(setkey)(jwt_common_t *__cmd, const jwt_alg_t alg,
 
 	__cmd->c.alg = alg;
 	__cmd->c.key = key;
+
+#ifdef JWT_CHECKER
+	/* Setting a single key clears any keyring; the last call wins. */
+	__cmd->c.keyring = NULL;
+#endif
+
+#ifdef JWT_BUILDER
+	/* @rfc{7515,7.2} Mirror the primary signer into the first signature, so
+	 * a JSON-format build (and any later add_signature) sees it in the list.
+	 * Repeated setkey() updates that same first node rather than appending. */
+	{
+		struct jwt_signature *s = jwt_signature_first_or_add(&__cmd->c);
+
+		if (s == NULL) {
+			// LCOV_EXCL_START
+			jwt_write_error(__cmd, "Error allocating memory");
+			return 1;
+			// LCOV_EXCL_STOP
+		}
+		s->alg = alg;
+		s->key = key;
+	}
+#endif
 
 	return 0;
 }
@@ -511,6 +571,36 @@ int FUNC(verify)(jwt_common_t *__cmd, const char *token)
 		return 1;
 	}
 
+	/* Clear any signature state from a prior verify (checker reuse). */
+	{
+		struct jwt_signature *s, *tmp;
+
+		list_for_each_entry_safe(s, tmp, &__cmd->c.signatures, node) {
+			list_del(&s->node);
+			jwt_signature_free(s);
+		}
+		__cmd->c.n_signatures = 0;
+		__cmd->c.last_sig_count = 0;
+
+		/* @rfc{7515,4.1.3} Drop a confirmed embedded key from a prior
+		 * verify before it can be borrowed by this one. */
+		if (__cmd->c.embedded_owned != NULL) {
+			jwks_free(__cmd->c.embedded_owned);
+			__cmd->c.embedded_owned = NULL;
+		}
+	}
+
+	/* @rfc{7515,7.2} A token whose first non-whitespace byte is '{' is a
+	 * JWS JSON Serialization; otherwise it is the Compact form. */
+	{
+		const char *p = token;
+
+		while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+			p++;
+		if (*p == '{')
+			return jwt_verify_json(__cmd, token);
+	}
+
 	jwt = jwt_new();
 	if (jwt == NULL) {
 		// LCOV_EXCL_START
@@ -528,6 +618,25 @@ int FUNC(verify)(jwt_common_t *__cmd, const char *token)
 	config.key = __cmd->c.key;
 	config.alg = __cmd->c.alg;
 	config.ctx = __cmd->c.cb_ctx;
+
+	/* @rfc{7515,4.1.3} Embedded-JWK verify: seed the key from the protected
+	 * header "jwk", but only after confirming it against the pinned
+	 * thumbprint or the allowlist. The callback (below) still sees and may
+	 * override it. The owning keyring lives on the checker (freed next verify
+	 * or at checker free) so jwt_checker_sig_key() can borrow the key. */
+	if (__cmd->c.embedded_jwk) {
+		const jwk_item_t *ek = NULL;
+
+		__cmd->c.embedded_owned =
+			jwt_embedded_jwk_key(&__cmd->c, jwt->headers, &ek);
+		if (ek == NULL) {
+			jwt_write_error(__cmd,
+				"Embedded JWK is missing or not confirmed");
+			return 1;
+		}
+		config.key = ek;
+		config.alg = jwt->alg;
+	}
 
 	/* Let the user handle this and update config */
         if (__cmd->c.cb && __cmd->c.cb(jwt, &config)) {
@@ -556,11 +665,392 @@ int FUNC(verify)(jwt_common_t *__cmd, const char *token)
 	/* Copy any errors back */
 	jwt_copy_error(__cmd, jwt);
 
+	/* Record the single verified signature so the introspection API
+	 * (sig_count/sig_verified/sig_key) works for a Compact token too. */
+	if (__cmd->error == 0) {
+		struct jwt_signature *s = jwt_signature_append(&__cmd->c);
+
+		if (s != NULL) {
+			s->verified = 1;
+			s->key = jwt->key;
+			s->alg = jwt->alg;
+		}
+		__cmd->c.last_sig_count = 1;
+	}
+
 	return __cmd->error;
+}
+
+int jwt_checker_setkeyring(jwt_checker_t *checker, const jwk_set_t *keyring,
+			   jwt_verify_policy_t policy)
+{
+	if (checker == NULL)
+		return 1;
+
+	if (keyring == NULL) {
+		jwt_write_error(checker, "A keyring is required");
+		return 1;
+	}
+
+	if (policy != JWT_VERIFY_POLICY_ANY && policy != JWT_VERIFY_POLICY_ALL) {
+		jwt_write_error(checker, "Invalid verification policy");
+		return 1;
+	}
+
+	/* Mutually exclusive with a single key; the last call wins. */
+	checker->c.key = NULL;
+	checker->c.alg = JWT_ALG_NONE;
+	checker->c.keyring = keyring;
+	checker->c.policy = policy;
+
+	return 0;
+}
+
+int jwt_checker_expect_typ(jwt_checker_t *checker, const char *typ)
+{
+	char *copy = NULL;
+
+	if (checker == NULL)
+		return 1;
+
+	if (typ != NULL) {
+		size_t n = strlen(typ) + 1;
+
+		copy = jwt_malloc(n);
+		if (copy == NULL) {
+			jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
+			return 1; // LCOV_EXCL_LINE
+		}
+		memcpy(copy, typ, n);
+	}
+
+	jwt_freemem(checker->c.expected_typ);
+	checker->c.expected_typ = copy;
+
+	return 0;
+}
+
+int jwt_checker_setalgs(jwt_checker_t *checker, const jwt_alg_t *algs, size_t n)
+{
+	jwt_alg_t *copy = NULL;
+	size_t i;
+
+	if (checker == NULL)
+		return 1;
+
+	if (algs != NULL && n > 0) {
+		for (i = 0; i < n; i++) {
+			if (algs[i] >= JWT_ALG_INVAL) {
+				jwt_write_error(checker,
+					"Invalid algorithm in allowlist");
+				return 1;
+			}
+		}
+		copy = jwt_malloc(n * sizeof(jwt_alg_t));
+		if (copy == NULL) {
+			jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
+			return 1; // LCOV_EXCL_LINE
+		}
+		memcpy(copy, algs, n * sizeof(jwt_alg_t));
+	}
+
+	jwt_freemem(checker->c.alg_allowlist);
+	checker->c.alg_allowlist = copy;
+	checker->c.n_alg_allowlist = copy ? n : 0;
+
+	return 0;
+}
+
+int jwt_checker_require(jwt_checker_t *checker, const char **claims,
+			unsigned int count)
+{
+	char **copy = NULL;
+	unsigned int i;
+
+	if (checker == NULL)
+		return 1;
+
+	if (claims != NULL && count > 0) {
+		for (i = 0; i < count; i++) {
+			if (claims[i] == NULL || claims[i][0] == '\0') {
+				jwt_write_error(checker,
+					"A required claim name is empty");
+				return 1;
+			}
+		}
+
+		copy = jwt_malloc(count * sizeof(char *));
+		if (copy == NULL) {
+			jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
+			return 1; // LCOV_EXCL_LINE
+		}
+
+		for (i = 0; i < count; i++) {
+			size_t len = strlen(claims[i]) + 1;
+
+			copy[i] = jwt_malloc(len);
+			if (copy[i] == NULL) {
+				// LCOV_EXCL_START
+				while (i-- > 0)
+					jwt_freemem(copy[i]);
+				jwt_freemem(copy);
+				jwt_write_error(checker, "Error allocating memory");
+				return 1;
+				// LCOV_EXCL_STOP
+			}
+			memcpy(copy[i], claims[i], len);
+		}
+	}
+
+	/* Replace any previous requirement set. */
+	if (checker->c.require != NULL) {
+		for (i = 0; i < checker->c.n_require; i++)
+			jwt_freemem(checker->c.require[i]);
+		jwt_freemem(checker->c.require);
+	}
+	checker->c.require = copy;
+	checker->c.n_require = copy ? count : 0;
+
+	return 0;
+}
+
+/* Reject an out-of-range thumbprint selector at configure time (jwks_item_thumbprint
+ * also rejects it later, but failing here gives a clearer error). */
+static int thumbprint_alg_ok(jwt_checker_t *checker, jwk_thumbprint_alg_t alg)
+{
+	if (alg != JWK_THUMBPRINT_SHA256 && alg != JWK_THUMBPRINT_SHA384 &&
+	    alg != JWK_THUMBPRINT_SHA512) {
+		jwt_write_error(checker, "Invalid thumbprint algorithm");
+		return 0;
+	}
+	return 1;
+}
+
+int jwt_checker_enable_embedded_jwk(jwt_checker_t *checker,
+				    jwk_thumbprint_alg_t alg,
+				    const char *expected_jkt)
+{
+	char *copy;
+	size_t n;
+
+	if (checker == NULL)
+		return 1;
+
+	if (!thumbprint_alg_ok(checker, alg))
+		return 1;
+
+	/* @rfc{7515,4.1.3} The header "jwk" is attacker-supplied, so a key
+	 * confirmation is mandatory: refuse to enable a "trust whatever is
+	 * embedded" mode. */
+	if (expected_jkt == NULL || expected_jkt[0] == '\0') {
+		jwt_write_error(checker,
+			"A pinned thumbprint is required to trust an embedded JWK");
+		return 1;
+	}
+
+	n = strlen(expected_jkt) + 1;
+	copy = jwt_malloc(n);
+	if (copy == NULL) {
+		jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
+		return 1; // LCOV_EXCL_LINE
+	}
+	memcpy(copy, expected_jkt, n);
+
+	jwt_freemem(checker->c.embedded_jkt);
+	checker->c.embedded_jkt = copy;
+	checker->c.embedded_keyring = NULL;
+	checker->c.embedded_alg = alg;
+	checker->c.embedded_jwk = 1;
+
+	return 0;
+}
+
+int jwt_checker_enable_embedded_jwk_keyring(jwt_checker_t *checker,
+					    jwk_thumbprint_alg_t alg,
+					    const jwk_set_t *allowed)
+{
+	if (checker == NULL)
+		return 1;
+
+	if (!thumbprint_alg_ok(checker, alg))
+		return 1;
+
+	if (allowed == NULL) {
+		jwt_write_error(checker,
+			"An allowlist keyring is required to trust an embedded JWK");
+		return 1;
+	}
+
+	/* The keyring is borrowed (like the verify keyring); the caller keeps
+	 * ownership and must keep it valid for the checker's lifetime. */
+	jwt_freemem(checker->c.embedded_jkt);
+	checker->c.embedded_jkt = NULL;
+	checker->c.embedded_keyring = allowed;
+	checker->c.embedded_alg = alg;
+	checker->c.embedded_jwk = 1;
+
+	return 0;
+}
+
+static const struct jwt_signature *checker_sig_at(const jwt_checker_t *checker,
+						  unsigned int index)
+{
+	const struct jwt_signature *s;
+	unsigned int i = 0;
+
+	if (checker == NULL || checker->c.signatures.next == NULL)
+		return NULL;
+
+	list_for_each_entry(s, &checker->c.signatures, node) {
+		if (i++ == index)
+			return s;
+	}
+
+	return NULL;
+}
+
+unsigned int jwt_checker_sig_count(const jwt_checker_t *checker)
+{
+	if (checker == NULL)
+		return 0;
+
+	return checker->c.last_sig_count;
+}
+
+int jwt_checker_sig_verified(const jwt_checker_t *checker, unsigned int index)
+{
+	const struct jwt_signature *s = checker_sig_at(checker, index);
+
+	return (s != NULL && s->verified) ? 1 : 0;
+}
+
+const jwk_item_t *jwt_checker_sig_key(const jwt_checker_t *checker,
+				      unsigned int index)
+{
+	const struct jwt_signature *s = checker_sig_at(checker, index);
+
+	return (s != NULL && s->verified) ? s->key : NULL;
 }
 #endif
 
 #ifdef JWT_BUILDER
+int jwt_builder_set_format(jwt_builder_t *builder, jwt_serialization_t format)
+{
+	if (builder == NULL)
+		return 1;
+
+	if (format != JWT_FORMAT_COMPACT && format != JWT_FORMAT_JSON_FLAT &&
+	    format != JWT_FORMAT_JSON_GENERAL) {
+		jwt_write_error(builder, "Invalid serialization format");
+		return 1;
+	}
+
+	builder->c.format = format;
+
+	return 0;
+}
+
+int jwt_builder_setpayload(jwt_builder_t *builder, const unsigned char *data,
+			   size_t len)
+{
+	unsigned char *copy = NULL;
+
+	if (builder == NULL)
+		return 1;
+
+	if (data != NULL && len > 0) {
+		copy = jwt_malloc(len);
+		if (copy == NULL) {
+			jwt_write_error(builder, "Error allocating memory"); // LCOV_EXCL_LINE
+			return 1; // LCOV_EXCL_LINE
+		}
+		memcpy(copy, data, len);
+	}
+
+	/* Replace any previous raw payload (NULL/0 clears it). */
+	jwt_scrub_and_free(builder->c.payload_raw, builder->c.payload_raw_len);
+	builder->c.payload_raw = copy;
+	builder->c.payload_raw_len = copy ? len : 0;
+
+	return 0;
+}
+
+int jwt_builder_setb64(jwt_builder_t *builder, int b64)
+{
+	if (builder == NULL)
+		return 1;
+
+	builder->c.b64 = b64 ? 1 : 0;
+
+	return 0;
+}
+
+int jwt_builder_set_detached(jwt_builder_t *builder, int detached)
+{
+	if (builder == NULL)
+		return 1;
+
+	builder->c.detached = detached ? 1 : 0;
+
+	return 0;
+}
+
+int jwt_builder_settyp(jwt_builder_t *builder, const char *typ)
+{
+	jwt_json_t *v;
+
+	if (builder == NULL)
+		return 1;
+
+	if (typ == NULL) {
+		jwt_json_obj_del(builder->c.headers, "typ");
+		return 0;
+	}
+
+	v = jwt_json_create_str(typ);
+	if (v == NULL || jwt_json_obj_set(builder->c.headers, "typ", v)) {
+		jwt_write_error(builder, "Error setting \"typ\" header"); // LCOV_EXCL_LINE
+		return 1; // LCOV_EXCL_LINE
+	}
+
+	return 0;
+}
+
+jwt_signature_t *jwt_builder_add_signature(jwt_builder_t *builder,
+					   jwt_alg_t alg, const jwk_item_t *key)
+{
+	struct jwt_signature *s;
+
+	if (builder == NULL)
+		return NULL;
+
+	if (alg == JWT_ALG_NONE) {
+		jwt_write_error(builder,
+			"A signature requires an algorithm (not \"none\")");
+		return NULL;
+	}
+
+	/* Same alg/key validation as setkey (private key, alg<->kty binding,
+	 * alg<->key match). */
+	if (__setkey_check(builder, alg, key))
+		return NULL;
+
+	s = jwt_signature_append(&builder->c);
+	if (s == NULL) {
+		jwt_write_error(builder, "Error allocating memory"); // LCOV_EXCL_LINE
+		return NULL; // LCOV_EXCL_LINE
+	}
+
+	s->alg = alg;
+	s->key = key;
+
+	/* @rfc{7515,7.2.1} A second signature requires the General JSON form. */
+	if (builder->c.n_signatures > 1)
+		builder->c.format = JWT_FORMAT_JSON_GENERAL;
+
+	return s;
+}
+
 char *FUNC(generate)(jwt_common_t *__cmd)
 {
 	JWT_CONFIG_DECLARE(config);
@@ -642,10 +1132,66 @@ char *FUNC(generate)(jwt_common_t *__cmd)
 	jwt->alg = config.alg;
 	jwt->key = config.key;
 
+	/* @rfc{7797} Thread the unencoded/detached options onto the token. */
+	jwt->b64 = __cmd->c.b64;
+	jwt->detached = __cmd->c.detached;
+	jwt->payload_raw = __cmd->c.payload_raw;
+	jwt->payload_raw_len = __cmd->c.payload_raw_len;
+
+	if (!jwt->b64) {
+		/* RFC 7797 forbids b64=false for JWTs (JSON claim sets), so it
+		 * is only valid over a raw payload. */
+		if (jwt->payload_raw == NULL) {
+			jwt_write_error(__cmd,
+				"b64=false (RFC 7797) requires a raw payload "
+				"set with jwt_builder_setpayload()");
+			return NULL;
+		}
+		/* An unencoded payload appears verbatim in the serialized token
+		 * (a C string / JSON string), which cannot carry an embedded NUL.
+		 * Reject it rather than silently truncate. */
+		if (memchr(jwt->payload_raw, '\0', jwt->payload_raw_len) != NULL) {
+			jwt_write_error(__cmd,
+				"An unencoded (b64=false) payload must not "
+				"contain a NUL byte");
+			return NULL;
+		}
+		/* @rfc{7797,6} Emit "b64":false and mark "b64" critical. */
+		if (jwt_apply_b64_header(jwt)) {
+			jwt_copy_error(__cmd, jwt);
+			return NULL;
+		}
+	}
+
 	/* @rfc{7515,4.1.11} Emit the "crit" header if any were registered.
 	 * Done after the callback so it can add the headers being marked. */
 	if (jwt_write_crit(jwt, __cmd->c.understood)) {
 		jwt_copy_error(__cmd, jwt);
+		return NULL;
+	}
+
+	/* @rfc{7515,7.2} JSON Serialization (one or more signatures). */
+	if (__cmd->c.format != JWT_FORMAT_COMPACT) {
+		if (__cmd->c.n_signatures == 0) {
+			jwt_write_error(__cmd, "No key set for JSON serialization");
+			return NULL;
+		}
+		if (__cmd->c.format == JWT_FORMAT_JSON_FLAT &&
+		    __cmd->c.n_signatures > 1) {
+			jwt_write_error(__cmd,
+				"Flattened serialization allows only one signature");
+			return NULL;
+		}
+
+		out = jwt_encode_json(jwt, &__cmd->c);
+		jwt_copy_error(__cmd, jwt);
+		return out;
+	}
+
+	/* @rfc{7515,7.1} Compact Serialization carries exactly one signature. */
+	if (__cmd->c.n_signatures > 1) {
+		jwt_write_error(__cmd,
+			"Compact serialization cannot carry multiple signatures");
 		return NULL;
 	}
 

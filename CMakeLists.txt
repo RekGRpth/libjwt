@@ -407,10 +407,31 @@ if (CHECK_FOUND)
 
 	# JWKS Tests
 	list (APPEND UNIT_TESTS jwt_jwks jwt_jwks_errors
-		jwt_ec jwt_rsa jwt_hs jwt_jwks_pem)
+		jwt_ec jwt_rsa jwt_hs jwt_jwks_pem jwt_thumbprint)
 
 	# Checker and Builder
-	list (APPEND UNIT_TESTS jwt_builder jwt_checker jwt_flipflop)
+	list (APPEND UNIT_TESTS jwt_builder jwt_checker jwt_flipflop jwt_xbackend)
+
+	# JWS JSON Serialization (multi-signature)
+	list (APPEND UNIT_TESTS jws_json)
+
+	# RFC 7797 unencoded / detached payload
+	list (APPEND UNIT_TESTS jws_b64)
+
+	# RFC 8725 typ helper + algorithm allowlist
+	list (APPEND UNIT_TESTS jwt_typ_alg)
+
+	# Key generation (jwks_generate)
+	list (APPEND UNIT_TESTS jwt_generate)
+
+	# RFC 7517 X.509 params (x5c/x5t/x5t#S256)
+	list (APPEND UNIT_TESTS jwt_x509)
+
+	# Cached remote JWKS source (TTL/ETag/cooldown)
+	list (APPEND UNIT_TESTS jwt_jwks_cache)
+
+	# Application profiles (#317): the small primitives + worked recipes
+	list (APPEND UNIT_TESTS jwt_hash jwt_require jwt_embedded_jwk jwt_profiles)
 
 	# ML-DSA (FIPS 204 / RFC 9964). The test is a no-op unless the build
 	# enabled WITH_ML_DSA against a capable backend.
@@ -418,11 +439,11 @@ if (CHECK_FOUND)
 
 	# JWE
 	list (APPEND UNIT_TESTS jwe_foundation jwe_keys jwe_gcm jwe_cbc
-		jwe_aeskw jwe_rsa jwe_ecdh jwe_json jwe_aad jwe_multi
-		jwe_json_neg)
+		jwe_aeskw jwe_gcmkw jwe_pbes2 jwe_rsa jwe_ecdh jwe_json jwe_aad
+		jwe_multi jwe_json_neg)
 
 	# Claims
-	list (APPEND UNIT_TESTS jwt_claims)
+	list (APPEND UNIT_TESTS jwt_claims jwt_cnf)
 
 	# Security
 	list (APPEND UNIT_TESTS jwt_security)
