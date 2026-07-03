@@ -42,6 +42,21 @@ CLAIM_RES="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhZG1pbiI6ZmFsc2UsImV4cCI6MTgz
 }
 
 @test "Generate JWKS from PEM Files" {
+	# The golden all.json covers every key type, but only the OpenSSL backend
+	# converts them all: GnuTLS has no secp256k1, MbedTLS has no EdDSA (the
+	# others silently fall back to an "oct" key via TRY_HMAC). OpenSSL is the
+	# only backend that yields EC for secp256k1 AND OKP for Ed25519, so probe
+	# both and skip otherwise.
+	k1=$(./tools/key2jwk -o - \
+		${SRCDIR}/tests/keys/pem-files/ec_key_secp256k1.pem 2>/dev/null \
+		| jq -r '.keys[0].kty')
+	ed=$(./tools/key2jwk -o - \
+		${SRCDIR}/tests/keys/pem-files/eddsa_key_ed25519.pem 2>/dev/null \
+		| jq -r '.keys[0].kty')
+	if [ "${k1}" != "EC" ] || [ "${ed}" != "OKP" ]; then
+		skip "active backend cannot convert all key types (needs OpenSSL)"
+	fi
+
 	./tools/key2jwk --disable-kid -o - \
 		${SRCDIR}/tests/keys/pem-files/*.pem \
 		${SRCDIR}/tests/keys/pem-files/*.bin | \
@@ -67,16 +82,40 @@ EOF
 )
 }
 
+@test "Generate JWK from DER matches PEM" {
+	./tools/key2jwk --disable-kid -o - \
+		${SRCDIR}/tests/keys/pem-files/rsa_key_2048.der | \
+		grep -v libjwt.io: > der.json
+	./tools/key2jwk --disable-kid -o - \
+		${SRCDIR}/tests/keys/pem-files/rsa_key_2048.pem | \
+		grep -v libjwt.io: > pem.json
+
+	jq -r -n --slurpfile A pem.json --slurpfile B der.json -f <(cat<<"EOF"
+def equiv(x): . == x;
+if ($A[0].keys[0]) == ($B[0].keys[0]) then empty else halt_error(1) end
+EOF
+)
+}
+
 @test "Convert JWK to PEM - RSA" {
 	rm -f rsa_1024_0023a6e1-f093-448d-9038-9ff168611b86.pem
 	./tools/jwk2key -d . ${SRCDIR}/tests/keys/rsa_key_1024.json
+	# The byte-exact comparison assumes the PKCS#8 ("BEGIN PRIVATE KEY")
+	# serialization that OpenSSL and GnuTLS emit. The MbedTLS backend writes
+	# the equally-valid PKCS#1 ("BEGIN RSA PRIVATE KEY") form, so skip the
+	# comparison when the produced PEM is not PKCS#8.
+	head -1 rsa_1024_0023a6e1-f093-448d-9038-9ff168611b86.pem \
+		| grep -q -- "-----BEGIN PRIVATE KEY-----" \
+		|| skip "backend emits a non-PKCS#8 PEM serialization"
 	cmp rsa_1024_0023a6e1-f093-448d-9038-9ff168611b86.pem ${SRCDIR}/tests/keys/pem-files/rsa_key_1024.pem
 }
 
 @test "Convert JWK to PEM - OCT" {
-	rm -f oct_384.bin
+	rm -f oct_384*.bin
 	./tools/jwk2key -d . ${SRCDIR}/tests/keys/oct_key_384.json
-	cmp oct_384.bin ${SRCDIR}/tests/cli/oct_384.bin
+	# oct_key_384.json carries no "kid", so jwk2key names the file by the
+	# key's RFC 7638 thumbprint: oct_384_<thumbprint>.bin
+	cmp oct_384_*.bin ${SRCDIR}/tests/cli/oct_384.bin
 }
 
 # JWE tools
@@ -184,8 +223,9 @@ ECENC="../tests/keys/ec_key_prime256v1_enc.json"
 # A crash is not a reliable signal (the overflow lands in adjacent stack
 # memory and often doesn't fault), so instead assert the *observable*
 # outcome: with the fix, bits is safely truncated and a correctly named
-# oct_1050000.bin is written. Without the fix, the overflow corrupts the
-# output path and that file is never created.
+# oct_1050000_<thumbprint>.bin is written (the JWK has no "kid", so jwk2key
+# names it by thumbprint). Without the fix, the overflow corrupts the output
+# path and that file is never created.
 @test "jwk2key handles oversized oct key without buffer overflow (#264)" {
 	dir="${BATS_TMPDIR:-/tmp}/jwk2key264_$$"
 	mkdir -p "${dir}"
@@ -199,10 +239,91 @@ ECENC="../tests/keys/ec_key_prime256v1_enc.json"
 
 	status_was="${status}"
 	have_out=0
-	[ -f "${dir}/oct_1050000.bin" ] && have_out=1
+	ls "${dir}"/oct_1050000_*.bin >/dev/null 2>&1 && have_out=1
 	rm -rf "${dir}"
 
 	# Must not crash (128+signal) and must produce the correctly named file.
 	[ "${status_was}" -lt 128 ]
 	[ "${have_out}" -eq 1 ]
+}
+
+# --- ML-DSA (FIPS 204 / RFC 9964) ----------------------------------------
+#
+# These only run when the library was built with WITH_ML_DSA against a capable
+# backend (OpenSSL >= 3.5); otherwise jwt-generate does not list the algorithm
+# and the tests skip. Fixtures are the committed AKP JWKs under tests/keys.
+
+mldsa_supported() {
+	./tools/jwt-generate -l 2>/dev/null | grep -q 'ML-DSA-44'
+}
+
+@test "ML-DSA sign and verify (all variants)" {
+	mldsa_supported || skip "ML-DSA not built in (needs WITH_ML_DSA + OpenSSL>=3.5)"
+
+	for v in 44 65 87; do
+		priv="${SRCDIR}/tests/keys/mldsa_key_${v}.json"
+		pub="${SRCDIR}/tests/keys/mldsa_key_${v}_pub.json"
+		token="$(./tools/jwt-generate -q -k "${priv}" -c s:sub=alice)"
+		[ -n "${token}" ]
+		./tools/jwt-verify -k "${pub}" "${token}"
+	done
+}
+
+@test "ML-DSA cross-variant verification fails" {
+	mldsa_supported || skip "ML-DSA not built in"
+
+	token="$(./tools/jwt-generate -q -k ${SRCDIR}/tests/keys/mldsa_key_44.json -c s:sub=bob)"
+	[ -n "${token}" ]
+	run ./tools/jwt-verify -k ${SRCDIR}/tests/keys/mldsa_key_87_pub.json "${token}"
+	[ "${status}" -ne 0 ]
+}
+
+@test "key2jwk converts an ML-DSA PEM to an AKP JWK" {
+	mldsa_supported || skip "ML-DSA not built in"
+
+	kty=$(./tools/key2jwk -o - \
+		${SRCDIR}/tests/keys/mldsa-pem/mldsa_key_65.pem 2>/dev/null \
+		| jq -r '.keys[0].kty')
+	[ "${kty}" = "AKP" ]
+}
+
+# JWS JSON Serialization (multi-signature, RFC 7515 7.2) — issue #308
+EC_KEY="../tests/keys/ec_key_prime256v1.json"
+RS_KEY="../tests/keys/rsa_key_2048.json"
+JWS_RING="../tests/keys/jwks_jws_pair.json"
+
+@test "Generate a Flattened JWS and verify it" {
+	token="$(./tools/jwt-generate -q -n -F flat -k ${EC_KEY})"
+	[ "${token:0:1}" = "{" ]
+	echo "${token}" | jq -e '.protected and .signature and (.signatures | not)'
+	./tools/jwt-verify -q -k ${EC_KEY} "${token}"
+}
+
+@test "Generate a General multi-signature JWS (RS256 + ES256)" {
+	token="$(./tools/jwt-generate -q -n -k ${RS_KEY} -k ${EC_KEY})"
+	echo "${token}" | jq -e '.signatures | length == 2'
+}
+
+@test "Verify a multi-signature JWS against a keyring (policy any)" {
+	token="$(./tools/jwt-generate -q -n -k ${RS_KEY} -k ${EC_KEY})"
+	./tools/jwt-verify -q -r ${JWS_RING} -P any "${token}"
+}
+
+@test "Verify a multi-signature JWS against a keyring (policy all)" {
+	token="$(./tools/jwt-generate -q -n -k ${RS_KEY} -k ${EC_KEY})"
+	./tools/jwt-verify -q -r ${JWS_RING} -P all "${token}"
+}
+
+@test "Policy all fails when the keyring lacks a signer's key" {
+	token="$(./tools/jwt-generate -q -n -k ${RS_KEY} -k ${EC_KEY})"
+	# A ring with only the EC key: ES256 verifies, RS256 does not.
+	run ./tools/jwt-verify -q -r ${EC_KEY} -P all "${token}"
+	[ "${status}" -ne 0 ]
+	run ./tools/jwt-verify -q -r ${EC_KEY} -P any "${token}"
+	[ "${status}" -eq 0 ]
+}
+
+@test "key and keyring are mutually exclusive" {
+	run ./tools/jwt-verify -k ${EC_KEY} -r ${JWS_RING} "x.y.z"
+	[ "${status}" -ne 0 ]
 }

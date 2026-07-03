@@ -1,4 +1,4 @@
-/* Copyright (C) 2015-2025 maClara, LLC <info@maclara-llc.com>
+/* Copyright (C) 2015-2026 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -190,6 +190,24 @@ static int openssl_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 			SIGN_ERROR("Unknown EdDSA curve"); // LCOV_EXCL_LINE
 		break;
 
+#if defined(LIBJWT_HAVE_ML_DSA) && OPENSSL_VERSION_NUMBER >= 0x30500000L
+	/* ML-DSA (FIPS 204): one-shot, like EdDSA. Provider-native ML-DSA
+	 * keys have no legacy NID (EVP_PKEY_id() == -1), so the variant is
+	 * validated by name here; setting type to the key's (negative) id
+	 * makes the shared NID compatibility check below a no-op. */
+	case JWT_ALG_ML_DSA_44:
+	case JWT_ALG_ML_DSA_65:
+	case JWT_ALG_ML_DSA_87:
+		alg = EVP_md_null();
+		/* Unreachable in practice: an AKP JWK carries a required "alg"
+		 * that setkey pins to the key, so a variant mismatch is caught
+		 * before signing (cf. the EdDSA curve check above). */
+		if (!EVP_PKEY_is_a(pkey, jwt_alg_str(jwt->alg)))
+			SIGN_ERROR("Key does not match the ML-DSA algorithm"); // LCOV_EXCL_LINE
+		type = EVP_PKEY_id(pkey);
+		break;
+#endif
+
 	// LCOV_EXCL_START
 	default:
 		return 1;
@@ -336,6 +354,19 @@ static int openssl_verify_sha_pem(jwt_t *jwt, const char *head,
 			VERIFY_ERROR("Unknown EdDSA curve"); // LCOV_EXCL_LINE
 		break;
 
+#if defined(LIBJWT_HAVE_ML_DSA) && OPENSSL_VERSION_NUMBER >= 0x30500000L
+	/* ML-DSA (FIPS 204): one-shot, like EdDSA. See the signing path for
+	 * why the variant is validated by name and type is the key's id. */
+	case JWT_ALG_ML_DSA_44:
+	case JWT_ALG_ML_DSA_65:
+	case JWT_ALG_ML_DSA_87:
+		alg = NULL;
+		if (!EVP_PKEY_is_a(pkey, jwt_alg_str(jwt->alg)))
+			VERIFY_ERROR("Key does not match the ML-DSA algorithm");
+		type = EVP_PKEY_id(pkey);
+		break;
+#endif
+
 	// LCOV_EXCL_START
 	default:
 		VERIFY_ERROR("Unknown algorithm");
@@ -417,6 +448,59 @@ jwt_verify_sha_pem_done:
 	return jwt->error;
 }
 
+/* @rfc{7638} One-shot SHA-2 digest used by the JWK thumbprint. */
+static int openssl_sha(int sha_bits, const unsigned char *in, size_t in_len,
+		       unsigned char *out, unsigned int *out_len)
+{
+	const EVP_MD *md;
+
+	switch (sha_bits) {
+	case 256:
+		md = EVP_sha256();
+		break;
+	case 384:
+		md = EVP_sha384();
+		break;
+	case 512:
+		md = EVP_sha512();
+		break;
+	default:
+		return 1; // LCOV_EXCL_LINE
+	}
+
+	if (EVP_Digest(in, in_len, out, out_len, md, NULL) != 1)
+		return 1; // LCOV_EXCL_LINE
+
+	return 0;
+}
+
+static int openssl_pbkdf2(int sha_bits, const unsigned char *pw, size_t pw_len,
+			  const unsigned char *salt, size_t salt_len,
+			  unsigned int iter, unsigned char *out, size_t dk_len)
+{
+	const EVP_MD *md;
+
+	switch (sha_bits) {
+	case 256:
+		md = EVP_sha256();
+		break;
+	case 384:
+		md = EVP_sha384();
+		break;
+	case 512:
+		md = EVP_sha512();
+		break;
+	default:
+		return 1; // LCOV_EXCL_LINE
+	}
+
+	if (PKCS5_PBKDF2_HMAC((const char *)pw, (int)pw_len, salt, (int)salt_len,
+			      (int)iter, md, (int)dk_len, out) != 1)
+		return 1; // LCOV_EXCL_LINE
+
+	return 0;
+}
+
 /* Export our ops */
 struct jwt_crypto_ops jwt_openssl_ops = {
 	.name			= "openssl",
@@ -428,9 +512,17 @@ struct jwt_crypto_ops jwt_openssl_ops = {
 
 	.jwk_implemented	= 1,
 	.process_eddsa		= openssl_process_eddsa,
+#if defined(LIBJWT_HAVE_ML_DSA) && OPENSSL_VERSION_NUMBER >= 0x30500000L
+	.process_mldsa		= openssl_process_mldsa,
+#endif
 	.process_rsa		= openssl_process_rsa,
 	.process_ec		= openssl_process_ec,
 	.process_item_free	= openssl_process_item_free,
+	.key2jwk_params		= openssl_key2jwk_params,
+	.generate_pem		= openssl_generate_pem,
+
+	.sha			= openssl_sha,
+	.pbkdf2			= openssl_pbkdf2,
 
 	.jwe_implemented	= 1,
 	.rng			= openssl_rng,

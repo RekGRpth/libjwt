@@ -5,6 +5,7 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "jwt_tests.h"
 
@@ -50,6 +51,24 @@ START_TEST(test_jwks_keyring_load)
 		 * the ES256K keys only under native GnuTLS parsing. */
 		if (alg == JWT_ALG_ES256K &&
 		    gnutls_native_jwk(jwt_test_ops[_i].type))
+			continue;
+
+		/* MbedTLS (PSA) rejects RSA keys larger than the crypto build's
+		 * PSA_VENDOR_RSA_MAX_KEY_BITS (4096 by default) at parse, so the
+		 * two 8192-bit keys in this ring are flagged bad there. */
+		if (jwt_test_ops[_i].type == JWT_CRYPTO_OPS_MBEDTLS &&
+		    jwks_item_key_bits(item) > 4096) {
+			ck_assert_int_ne(jwks_item_error(item), 0);
+			continue;
+		}
+
+		/* GnuTLS < 3.8.13 cannot import a seed-only OKP private key (no 'x';
+		 * it crashes deriving the public key) and rejects X25519/X448. Such
+		 * keys load fine on GnuTLS >= 3.8.13 and on the other backends; skip
+		 * the ones this backend rejected. */
+		if (jwks_item_kty(item) == JWK_KEY_TYPE_OKP &&
+		    gnutls_okp_jwk_broken(jwt_test_ops[_i].type) &&
+		    jwks_item_error(item))
 			continue;
 
 		if (jwks_item_error(item)) {
@@ -114,8 +133,20 @@ START_TEST(test_jwks_keyring_load)
 	 * keys. */
 	i = jwks_item_free_bad(g_jwk_set);
 	if (gnutls_native_jwk(jwt_test_ops[_i].type)) {
-		ck_assert_int_eq(i, 1);
-		ck_assert_int_eq(jwks_item_count(g_jwk_set), 25);
+		if (gnutls_okp_jwk_broken(jwt_test_ops[_i].type)) {
+			/* Plus the two seed-only OKP private keys (Ed25519, Ed448)
+			 * that GnuTLS < 3.8.13 cannot import. */
+			ck_assert_int_eq(i, 3);
+			ck_assert_int_eq(jwks_item_count(g_jwk_set), 23);
+		} else {
+			ck_assert_int_eq(i, 1);
+			ck_assert_int_eq(jwks_item_count(g_jwk_set), 25);
+		}
+	} else if (jwt_test_ops[_i].type == JWT_CRYPTO_OPS_MBEDTLS) {
+		/* The two 8192-bit RSA keys exceed the PSA RSA size limit and
+		 * were rejected at parse. */
+		ck_assert_int_eq(i, 2);
+		ck_assert_int_eq(jwks_item_count(g_jwk_set), 24);
 	} else {
 		ck_assert_int_eq(i, 0);
 		ck_assert_int_eq(jwks_item_count(g_jwk_set), 26);
@@ -149,7 +180,53 @@ START_TEST(load_fromurl)
 	ck_assert_ptr_nonnull(jwk_set);
 
 	ck_assert_int_gt(jwks_item_count(jwk_set), 0);
+
+	/* verify=1 now requests full TLS verification (peer + host), the same
+	 * as verify=2; both must still load a plain file:// URL successfully. */
+	jwk_set = jwks_load_fromurl(jwk_set, test_url, 1);
+	ck_assert_ptr_nonnull(jwk_set);
+	ck_assert_int_gt(jwks_item_count(jwk_set), 0);
 }
+END_TEST
+
+/* A response larger than JWKS_MAX_RESPONSE_SIZE (1 MiB) must be rejected rather
+ * than read into memory unbounded. For a file:// URL CURLOPT_MAXFILESIZE
+ * catches the advertised size; the write_cb cap is the belt for bodies that do
+ * not advertise their size (e.g. chunked). Either way the load must fail. */
+START_TEST(load_fromurl_oversized)
+{
+	jwk_set_auto_t *jwk_set = NULL;
+	char path[] = "/tmp/libjwt_oversized_XXXXXX";
+	char *url = NULL;
+	size_t i;
+	int fd;
+	FILE *fp;
+
+	SET_OPS();
+
+	fd = mkstemp(path);
+	ck_assert_int_ge(fd, 0);
+	fp = fdopen(fd, "w");
+	ck_assert_ptr_nonnull(fp);
+
+	/* Write ~1.5 MiB of valid JSON whitespace wrapping an empty keyset, so
+	 * the size cap (not a JSON parse error) is what triggers rejection. */
+	fputs("{\"keys\":[]", fp);
+	for (i = 0; i < (size_t)(1536 * 1024); i++)
+		fputc(' ', fp);
+	fputs("}", fp);
+	fclose(fp);
+
+	ck_assert_int_gt(asprintf(&url, "file://%s", path), 0);
+
+	jwk_set = jwks_create_fromurl(url, 0);
+	ck_assert_ptr_nonnull(jwk_set);
+	ck_assert_int_ne(jwks_error(jwk_set), 0);
+
+	free(url);
+	unlink(path);
+}
+END_TEST
 #else
 START_TEST(load_fromurl)
 {
@@ -256,6 +333,9 @@ static Suite *libjwt_suite(const char *title)
 	tcase_add_loop_test(tc_core, test_jwks_keyring_all_bad, 0, i);
 
 	tcase_add_loop_test(tc_core, load_fromurl, 0, i);
+#ifdef HAVE_LIBCURL
+	tcase_add_loop_test(tc_core, load_fromurl_oversized, 0, i);
+#endif
 
 	/* Some coverage attempts */
 	tcase_add_loop_test(tc_core, test_jwks_key_op_all_types, 0, i);

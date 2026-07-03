@@ -1,4 +1,4 @@
-![LibJWT - The C JWT Library](images/LibJWT-800x152.png)
+![LibJWT - The C JWT Library](images/social-preview.png)
 ---
 
 [![codecov](https://codecov.io/gh/benmcollins/libjwt/graph/badge.svg?token=MhCaZ8cpwQ)](https://codecov.io/gh/benmcollins/libjwt)
@@ -14,6 +14,12 @@ Standard | RFC                                                                  
 ``JWK``  | :page_facing_up: [RFC-7517](https://datatracker.ietf.org/doc/html/rfc7517) | JSON Web Keys and Sets
 ``JWA``  | :page_facing_up: [RFC-7518](https://datatracker.ietf.org/doc/html/rfc7518) | JSON Web Algorithms
 ``JWT``  | :page_facing_up: [RFC-7519](https://datatracker.ietf.org/doc/html/rfc7519) | JSON Web Token
+``JWK Thumbprint`` | :page_facing_up: [RFC-7638](https://datatracker.ietf.org/doc/html/rfc7638) / [RFC-9278](https://datatracker.ietf.org/doc/html/rfc9278) | JWK Thumbprint and Thumbprint URI
+``cnf``  | :page_facing_up: [RFC-7800](https://datatracker.ietf.org/doc/html/rfc7800) | Proof-of-Possession (confirmation) claim helpers
+``Unencoded Payload`` | :page_facing_up: [RFC-7797](https://datatracker.ietf.org/doc/html/rfc7797) | JWS unencoded (``b64=false``) and detached payloads
+``BCP 225`` | :page_facing_up: [RFC-8725](https://datatracker.ietf.org/doc/html/rfc8725) | JWT Best Current Practices (``typ`` check, algorithm allowlist)
+``DPoP`` | :page_facing_up: [RFC-9449](https://datatracker.ietf.org/doc/html/rfc9449) | Proof-of-possession: embedded-JWK verify + ``ath`` token hash
+``Application Profiles`` | :page_facing_up: [RFC-9068](https://datatracker.ietf.org/doc/html/rfc9068) | ``at+jwt``, VAPID, PASSporT, OpenID4VCI, DPoP, mTLS, JAdES recipes
 
 > [!NOTE]
 > Throughout this documentation you will see links such as the ones
@@ -25,17 +31,21 @@ Standard | RFC                                                                  
 
 ### Required
 
-- [JANSSON](https://github.com/akheron/jansson) (>= 2.0)
+- A JSON library: either [Jansson](https://github.com/akheron/jansson)
+  (>= 2.0, the default) or [json-c](https://github.com/json-c/json-c)
+  (>= 0.16, selected with ``-DWITH_JSON_C=ON``). The two are interchangeable.
 - [CMake](https://cmake.org) (>= 3.7)
 
 ### Crypto support
 
 - OpenSSL (>= 3.0.0)
-- GnuTLS (>= 3.6.0)
+- GnuTLS (>= 3.8.8)
 - MbedTLS (>= 3.6.0)
 
 > [!NOTE]
-> OpenSSL is required and used for JWK(S) operations.
+> At least one crypto backend is required, but any non-empty combination
+> works. OpenSSL is enabled by default and can be disabled with
+> ``-DWITH_OPENSSL=OFF``. Each backend parses and converts JWK(S) natively.
 
 ### Algorithm support matrix
 
@@ -44,10 +54,118 @@ JWS Algorithm ``alg``         | OpenSSL            | GnuTLS             | MbedTL
 ``HS256`` ``HS384`` ``HS512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``ES256`` ``ES384`` ``ES512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``RS256`` ``RS384`` ``RS512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
-``EdDSA`` using ``ED25519``   | :white_check_mark: | :white_check_mark: | :x:
-``EdDSA`` using ``ED448``     | :white_check_mark: | :white_check_mark: ``>= 3.8.8`` | :x:
+``EdDSA`` using ``ED25519`` [^okp3813] | :white_check_mark: | :white_check_mark: | :x:
+``EdDSA`` using ``ED448`` [^okp3813] | :white_check_mark: | :white_check_mark: | :x:
 ``PS256`` ``PS384`` ``PS512`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``ES256K``                    | :white_check_mark: | :x:                | :white_check_mark:
+``ML-DSA-44/65/87`` [^mldsa]  | :white_check_mark: | :white_check_mark: | :x:
+
+[^mldsa]: ML-DSA (FIPS 204, registered for JOSE by
+[RFC 9964](https://datatracker.ietf.org/doc/rfc9964/)) is **experimental** and
+**off by default**. Build with ``-DWITH_ML_DSA=ON``; it is only enabled when a
+backend with ML-DSA support is present: OpenSSL >= 3.5, or GnuTLS >= 3.8.10
+built against a PQC provider (e.g. ``--with-leancrypto``). When built in, the
+public header defines ``LIBJWT_HAVE_ML_DSA``. ML-DSA keys use the ``"AKP"`` key
+type with a ``"pub"`` member and a ``"priv"`` member holding the 32-byte
+FIPS-204 seed. MbedTLS has no ML-DSA and rejects ``AKP`` keys.
+
+[^okp3813]: On the **GnuTLS** backend these specific cases need **GnuTLS >=
+3.8.13**: (a) loading an OKP *private* JWK supplied without its public
+coordinate ``x``, a "seed-only" ``Ed25519``/``Ed448`` key (older GnuTLS
+crashes deriving the public key); and (b) ``ECDH-ES`` with the ``X25519`` and
+``X448`` curves. Anything that carries ``x`` (including every public key and
+every PEM/DER key) is unaffected, as are the OpenSSL and MbedTLS backends. The
+version is checked at **runtime**, so upgrading the shared ``libgnutls`` to >=
+3.8.13 lifts the restriction without rebuilding LibJWT.
+
+#### JWS serialization
+
+LibJWT produces and verifies JWS (RFC 7515) in the Compact Serialization (the
+default) and the JSON Serialization — both the Flattened form and the General
+form with one or more signatures.
+
+| JWS serialization | Signatures | Supported |
+| :---------------- | :--------- | :-------- |
+| Compact (RFC 7515 §7.1)          | one         | :white_check_mark: |
+| JSON Flattened (RFC 7515 §7.2.2) | one         | :white_check_mark: |
+| JSON General (RFC 7515 §7.2.1)   | one or more | :white_check_mark: |
+
+Select the form with `jwt_builder_set_format()`; add extra signers (each with
+its own algorithm and per-signature protected/unprotected header) with
+`jwt_builder_add_signature()`. The same payload is signed independently by each
+signer, so signatures may use different algorithms (e.g. RS256 + ES256).
+
+To verify a multi-signature token, supply a set of candidate keys (a JWKS) with
+`jwt_checker_setkeyring()` and a policy: `JWT_VERIFY_POLICY_ANY` (the default —
+accept if at least one signature verifies, e.g. multi-issuer or key rotation) or
+`JWT_VERIFY_POLICY_ALL` (every signature must verify, e.g. co-signing). A
+signature naming a `kid` is matched to that key; a keyless one is tried against
+every compatible key, always under the usual algorithm/key-type binding.
+`jwt_checker_verify()` auto-detects Compact vs JSON input.
+
+##### Unencoded and detached payloads (RFC 7797)
+
+For a generic JWS over an opaque (non-claims) payload — e.g. HTTP message
+signatures or JAdES/eIDAS detached signatures — set the payload bytes with
+`jwt_builder_setpayload()`. `jwt_builder_setb64(b, 0)` selects the
+[RFC 7797](https://datatracker.ietf.org/doc/html/rfc7797) unencoded form
+(`"b64":false`, with `"b64"` marked critical and the signature computed over the
+raw payload), and `jwt_builder_set_detached()` omits the payload from the output.
+A detached token is verified with `jwt_checker_verify_detached()`, supplying the
+payload out-of-band. As mandated by RFC 7797 §6, the checker rejects a
+`"b64":false` token unless `"b64"` appears in `"crit"`.
+
+#### Key generation
+
+`jwks_generate()` produces a fresh key as a JWK, ready to sign/verify with:
+
+```c
+jwk_set_t *set = jwks_create_generate(JWK_KEY_TYPE_EC, "P-256",
+                                      JWT_ALG_ES256, JWK_KEY_GEN_KID);
+const jwk_item_t *key = jwks_item_get(set, 0);
+```
+
+It covers EC (incl. `secp256k1`), RSA / RSA-PSS, OKP (Ed25519/Ed448/X25519/X448),
+`oct`, and AKP (ML-DSA), bound to the active crypto backend. `JWK_KEY_GEN_KID`
+stamps the RFC 7638 thumbprint as the `kid`. Each backend generates what it
+supports (OpenSSL: all; GnuTLS: all but `secp256k1`/X-curves; MbedTLS: EC/RSA;
+`oct` everywhere); an unsupported request returns a clean error rather than a
+weak or partial key.
+
+#### X.509 in JWKs
+
+A JWK's X.509 parameters are parsed and exposed: `jwks_item_x5c_count()` /
+`jwks_item_x5c()` give the DER certificates of the `x5c` chain (the leaf at
+index 0), and `jwks_item_x5t()` / `jwks_item_x5t_s256()` return the `x5t` /
+`x5t#S256` thumbprints. When a JWK carries both `x5c` and `x5t#S256`, the
+thumbprint is verified against the leaf certificate at parse time
+(`base64url(SHA-256(DER))`, RFC 7517 §4.9) and a mismatch is rejected.
+Certificate-chain validation and `x5u` fetching are intentionally left to the
+caller for now (chain/trust policy and SSRF are security-critical).
+
+#### Cached remote JWKS (libcurl)
+
+`jwks_load_fromurl_cached()` fetches a JWKS from a URL and reuses the keyring as
+a cache: subsequent calls serve the cached keys without a network request while
+they are fresh (honoring the response `Cache-Control: max-age`, else a
+configurable TTL), and a stale cache is refreshed with a conditional GET
+(`If-None-Match`/`ETag`, so a `304` keeps the keys). `jwks_refresh_fromurl()`
+forces a refresh on an unknown-`kid` (key rotation), rate-limited by a cooldown
+so random `kid` values cannot amplify into a request flood. Only `http`/`https`
+URLs are accepted (an SSRF guard). Requires the `WITH_LIBCURL` build.
+
+#### Application Profiles
+
+Most real-world JWT specs are *application profiles* — an ordinary signed JWT
+with a particular `typ`, required claims, and key binding — not new crypto. The
+small primitives that complete them are: `jwt_checker_require()` (assert claims
+are present, RFC 9068), `jwt_checker_enable_embedded_jwk()` (verify a
+self-contained token against the header `jwk`, confirmed by thumbprint — DPoP and
+OpenID4VCI), and `jwt_token_hash()` / `jwt_token_hash_half()` (DPoP `ath`, OIDC
+`at_hash`/`c_hash`). The **Application Profiles** page of the docs has worked
+build-and-verify recipes for `at+jwt` (RFC 9068), VAPID, PASSporT, OpenID4VCI,
+DPoP (RFC 9449), mTLS (RFC 8705), and JAdES, each mirrored by a test in
+`tests/jwt_profiles.c`.
 
 #### JWE
 
@@ -67,16 +185,17 @@ each recipient wraps that CEK independently, so any recipient's key can decrypt
 the token. They also carry an optional shared unprotected header, per-recipient
 headers, and an application AAD member.
 
-Legend: :white_check_mark: native implementation &nbsp;·&nbsp;
-:large_blue_circle: supported, using OpenSSL as a fallback &nbsp;·&nbsp; :x: not supported
+Legend: :white_check_mark: native implementation &nbsp;·&nbsp; :x: not supported
 
 JWE key management ``alg``    | OpenSSL            | GnuTLS             | MbedTLS
 :---------------------------- | :----------------- | :----------------- | :-----------------
 ``dir`` (Direct Encryption)   | :white_check_mark: | :white_check_mark: | :white_check_mark:
 ``A128KW`` ``A192KW`` ``A256KW`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
-``RSA-OAEP`` (SHA-1)          | :white_check_mark: | :large_blue_circle: | :white_check_mark:
+``A128GCMKW`` ``A192GCMKW`` ``A256GCMKW`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
+``PBES2-HS256+A128KW`` ``PBES2-HS384+A192KW`` ``PBES2-HS512+A256KW`` | :white_check_mark: | :white_check_mark: | :white_check_mark:
+``RSA-OAEP`` (SHA-1)          | :white_check_mark: | :x:                | :white_check_mark:
 ``RSA-OAEP-256``              | :white_check_mark: | :white_check_mark: | :white_check_mark:
-``ECDH-ES`` (+ ``+A128KW``/``+A192KW``/``+A256KW``) | :white_check_mark: | :white_check_mark: | :white_check_mark:
+``ECDH-ES`` (+ ``+A128KW``/``+A192KW``/``+A256KW``) [^okp3813] | :white_check_mark: | :white_check_mark: | :white_check_mark:
 
 JWE content encryption ``enc`` | OpenSSL            | GnuTLS             | MbedTLS
 :----------------------------- | :----------------- | :----------------- | :-----------------
@@ -88,9 +207,17 @@ JWE content encryption ``enc`` | OpenSSL            | GnuTLS             | MbedT
 > wrapping modes, on the EC curves P-256/384/521 and the OKP curves
 > X25519/X448, with optional ``apu``/``apv`` PartyInfo. ``RSA1_5`` and
 > ``zip`` (compression) are intentionally not supported. Each backend
-> implements JWE natively, with one exception: GnuTLS/Nettle cannot perform
-> RSA-OAEP with SHA-1, so plain ``RSA-OAEP`` falls back to OpenSSL under the
-> GnuTLS backend (``RSA-OAEP-256`` is native).
+> implements JWE natively. GnuTLS/Nettle cannot perform RSA-OAEP with SHA-1,
+> so the GnuTLS backend does not support plain ``RSA-OAEP`` (``RSA-OAEP-256``
+> is native).
+
+> [!NOTE]
+> ``PBES2-*`` derive a key-wrapping key from a passphrase (the ``oct`` key's
+> octets) with PBKDF2 over a fresh random salt. The iteration count is set with
+> @ref jwe_builder_setpbes2 (a sensible default is used otherwise). On decrypt
+> the ``p2c`` iteration count is attacker-controlled, so libjwt enforces a hard
+> maximum and a minimum salt length and rejects anything outside them before
+> doing any PBKDF2 work — a deliberate DoS guard, like the omission of ``zip``.
 
 ### Optional
 
