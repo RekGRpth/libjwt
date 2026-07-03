@@ -1,4 +1,4 @@
-/* Copyright (C) 2025 maClara, LLC <info@maclara-llc.com>
+/* Copyright (C) 2025-2026 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -10,9 +10,17 @@
 #define JWT_OPENSSL_H
 
 int openssl_process_eddsa(jwt_json_t *jwk, jwk_item_t *item);
+#if defined(LIBJWT_HAVE_ML_DSA) && OPENSSL_VERSION_NUMBER >= 0x30500000L
+int openssl_process_mldsa(jwt_json_t *jwk, jwk_item_t *item);
+#endif
 int openssl_process_rsa(jwt_json_t *jwk, jwk_item_t *item);
 int openssl_process_ec(jwt_json_t *jwk, jwk_item_t *item);
 void openssl_process_item_free(jwk_item_t *item);
+JWT_NO_EXPORT
+int openssl_key2jwk_params(const char *key, size_t len, jwk_export_t *out);
+JWT_NO_EXPORT
+int openssl_generate_pem(jwk_key_type_t kty, const char *param, jwt_alg_t alg,
+			 char **pem_out, size_t *pem_len);
 
 /* JWE (RFC 7516/7518). These are backend internals reached only through the
  * jwt_crypto_ops table, so they must stay out of the shared library's ABI. */
@@ -65,15 +73,7 @@ int openssl_encrypt_cek_rsa(jwe_key_alg_t alg, const jwk_item_t *key,
 	const unsigned char *cek, size_t cek_len,
 	unsigned char **out, size_t *out_len);
 JWT_NO_EXPORT
-int openssl_encrypt_cek_rsa_pem(jwe_key_alg_t alg, const char *pem,
-	const unsigned char *cek, size_t cek_len,
-	unsigned char **out, size_t *out_len);
-JWT_NO_EXPORT
 int openssl_decrypt_cek_rsa(jwe_key_alg_t alg, const jwk_item_t *key,
-	const unsigned char *in, size_t in_len,
-	unsigned char **cek, size_t *cek_len);
-JWT_NO_EXPORT
-int openssl_decrypt_cek_rsa_pem(jwe_key_alg_t alg, const char *pem,
 	const unsigned char *in, size_t in_len,
 	unsigned char **cek, size_t *cek_len);
 JWT_NO_EXPORT

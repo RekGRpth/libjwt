@@ -1,4 +1,4 @@
-/* Copyright (C) 2015-2025 maClara, LLC <info@maclara-llc.com>
+/* Copyright (C) 2015-2026 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -615,8 +615,6 @@ int gnutls_unwrap_aes_kw_raw(const unsigned char *kek, size_t kek_len,
 	return kw_unwrap_raw(kek, kek_len, in, in_len, cek, cek_len);
 }
 
-#if JWT_GNUTLS_NATIVE_JWE
-
 #include <gnutls/abstract.h>
 #include <gnutls/x509.h>
 
@@ -656,10 +654,10 @@ int gnutls_encrypt_cek_rsa(jwe_key_alg_t alg, const jwk_item_t *key,
 	if (jk == NULL || jk->kty != JWK_KEY_TYPE_RSA)
 		return 1; // LCOV_EXCL_LINE
 
-	/* SHA-1 RSA-OAEP: GnuTLS cannot; delegate to OpenSSL via the PEM. */
+	/* SHA-1 RSA-OAEP: GnuTLS/nettle has no SHA-1 OAEP, so the GnuTLS backend
+	 * does not support plain RSA-OAEP (RSA-OAEP-256 is native). */
 	if (dig == GNUTLS_DIG_UNKNOWN)
-		return openssl_encrypt_cek_rsa_pem(alg, jwks_item_pem(key), cek,
-						   cek_len, out, out_len);
+		return 1;
 
 	if (gnutls_x509_spki_init(&spki))
 		return 1; // LCOV_EXCL_LINE
@@ -721,10 +719,10 @@ int gnutls_decrypt_cek_rsa(jwe_key_alg_t alg, const jwk_item_t *key,
 	if (jk == NULL || jk->kty != JWK_KEY_TYPE_RSA || jk->priv == NULL)
 		return 1; // LCOV_EXCL_LINE
 
-	/* SHA-1 RSA-OAEP: GnuTLS cannot; delegate to OpenSSL via the PEM. */
+	/* SHA-1 RSA-OAEP: GnuTLS/nettle has no SHA-1 OAEP, so the GnuTLS backend
+	 * does not support plain RSA-OAEP (RSA-OAEP-256 is native). */
 	if (oaep_dig(alg) == GNUTLS_DIG_UNKNOWN)
-		return openssl_decrypt_cek_rsa_pem(alg, jwks_item_pem(key), in,
-						   in_len, cek, cek_len);
+		return 1;
 
 	/* The RSA-OAEP-256 SPKI was attached to jk->priv once at parse time
 	 * (gnutls_jwk_rsa_set_oaep), so decrypt does not mutate the shared key
@@ -1119,5 +1117,3 @@ out:
 
 	return ret;
 }
-
-#endif /* JWT_GNUTLS_NATIVE_JWE */

@@ -1,5 +1,5 @@
 /* Copyright (C) 2017 Nicolas Mora <mail@babelouest.org>
-   Copyright (C) 2024-2025 maClara, LLC <info@maclara-llc.com>
+   Copyright (C) 2024-2026 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -79,6 +79,9 @@ static int gnutls_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 	gnutls_digest_algorithm_t alg;
 	int pk_alg, flags = 0;
 	unsigned int adj = 0;
+	/* Non-zero selects a one-shot gnutls_sign_algorithm_t (ML-DSA), which
+	 * signs via sign_data2() instead of the digest-based sign_data(). */
+	int sign_algo = 0;
 
 	if (gnutls_privkey_init(&privkey))
 		SIGN_ERROR("Error initializing privkey"); // LCOV_EXCL_LINE
@@ -163,6 +166,27 @@ static int gnutls_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 			SIGN_ERROR("Unknown EdDSA key"); // LCOV_EXCL_LINE
 		}
 		break;
+
+#if defined(LIBJWT_HAVE_ML_DSA) && GNUTLS_VERSION_NUMBER >= 0x03080a
+	/* ML-DSA (FIPS 204): one-shot via sign_data2(). pk_alg is the expected
+	 * variant so the shared check below rejects a mismatched key. */
+	case JWT_ALG_ML_DSA_44:
+		alg = GNUTLS_DIG_UNKNOWN;
+		pk_alg = GNUTLS_PK_MLDSA44;
+		sign_algo = GNUTLS_SIGN_MLDSA44;
+		break;
+	case JWT_ALG_ML_DSA_65:
+		alg = GNUTLS_DIG_UNKNOWN;
+		pk_alg = GNUTLS_PK_MLDSA65;
+		sign_algo = GNUTLS_SIGN_MLDSA65;
+		break;
+	case JWT_ALG_ML_DSA_87:
+		alg = GNUTLS_DIG_UNKNOWN;
+		pk_alg = GNUTLS_PK_MLDSA87;
+		sign_algo = GNUTLS_SIGN_MLDSA87;
+		break;
+#endif
+
 	// LCOV_EXCL_START
 	default:
 		SIGN_ERROR("Unknown signing alg");
@@ -179,9 +203,14 @@ static int gnutls_sign_sha_pem(jwt_t *jwt, char **out, unsigned int *len,
 		SIGN_ERROR("Alg mismatch with signing key"); // LCOV_EXCL_LINE
 	}
 
-	if (gnutls_privkey_sign_data(privkey, alg, flags,
-                                &body_dat, &sig_dat))
+	if (sign_algo) {
+		if (gnutls_privkey_sign_data2(privkey, sign_algo, 0,
+					      &body_dat, &sig_dat))
+			SIGN_ERROR("Failed to sign token"); // LCOV_EXCL_LINE
+	} else if (gnutls_privkey_sign_data(privkey, alg, flags,
+                                &body_dat, &sig_dat)) {
 		SIGN_ERROR("Failed to sign token"); // LCOV_EXCL_LINE
+	}
 
 	if (pk_alg == GNUTLS_PK_EC) {
 		/* Start EC handling. */
@@ -346,6 +375,21 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 			VERIFY_ERROR("Unknown EdDSA key type"); // LCOV_EXCL_LINE
 		}
 		break;
+
+#if defined(LIBJWT_HAVE_ML_DSA) && GNUTLS_VERSION_NUMBER >= 0x03080a
+	/* ML-DSA (FIPS 204): one-shot; the default branch below calls
+	 * gnutls_pubkey_verify_data2() with this sign algorithm. */
+	case JWT_ALG_ML_DSA_44:
+		alg = GNUTLS_SIGN_MLDSA44;
+		break;
+	case JWT_ALG_ML_DSA_65:
+		alg = GNUTLS_SIGN_MLDSA65;
+		break;
+	case JWT_ALG_ML_DSA_87:
+		alg = GNUTLS_SIGN_MLDSA87;
+		break;
+#endif
+
 	// LCOV_EXCL_START
 	default:
 		VERIFY_ERROR("Unknown alg");
@@ -402,7 +446,73 @@ static int gnutls_verify_sha_pem(jwt_t *jwt, const char *head,
 verify_clean_sig:
 	gnutls_pubkey_deinit(pubkey);
 
-	return ret;
+	/* Return the error flag, not ret: the default (RSA/RSA-PSS/EdDSA) branch
+	 * reaches VERIFY_ERROR without setting ret, so returning ret would report
+	 * a failed verification as success (0). jwt_write_error() always sets
+	 * jwt->error, so this reflects failure for every algorithm and matches
+	 * the OpenSSL and MbedTLS verify paths. */
+	return jwt->error;
+}
+
+/* @rfc{7638} One-shot SHA-2 digest used by the JWK thumbprint. */
+static int gnutls_sha(int sha_bits, const unsigned char *in, size_t in_len,
+		      unsigned char *out, unsigned int *out_len)
+{
+	gnutls_digest_algorithm_t alg;
+
+	switch (sha_bits) {
+	case 256:
+		alg = GNUTLS_DIG_SHA256;
+		break;
+	case 384:
+		alg = GNUTLS_DIG_SHA384;
+		break;
+	case 512:
+		alg = GNUTLS_DIG_SHA512;
+		break;
+	default:
+		return 1; // LCOV_EXCL_LINE
+	}
+
+	if (gnutls_hash_fast(alg, in, in_len, out))
+		return 1; // LCOV_EXCL_LINE
+
+	*out_len = gnutls_hash_get_len(alg);
+
+	return 0;
+}
+
+/* Named _op to avoid colliding with the library function gnutls_pbkdf2(). */
+static int gnutls_pbkdf2_op(int sha_bits, const unsigned char *pw, size_t pw_len,
+			    const unsigned char *salt, size_t salt_len,
+			    unsigned int iter, unsigned char *out, size_t dk_len)
+{
+	gnutls_datum_t key, slt;
+	gnutls_mac_algorithm_t mac;
+
+	switch (sha_bits) {
+	case 256:
+		mac = GNUTLS_MAC_SHA256;
+		break;
+	case 384:
+		mac = GNUTLS_MAC_SHA384;
+		break;
+	case 512:
+		mac = GNUTLS_MAC_SHA512;
+		break;
+	default:
+		return 1; // LCOV_EXCL_LINE
+	}
+
+	key.data = (unsigned char *)pw;
+	key.size = (unsigned int)pw_len;
+	slt.data = (unsigned char *)salt;
+	slt.size = (unsigned int)salt_len;
+
+	if (gnutls_pbkdf2(mac, &key, &slt, iter, out, dk_len))
+		return 1; // LCOV_EXCL_LINE
+
+	return 0;
 }
 
 /* Export our ops */
@@ -415,20 +525,20 @@ struct jwt_crypto_ops jwt_gnutls_ops = {
 	.verify_sha_pem		= gnutls_verify_sha_pem,
 
 	.jwk_implemented	= 1,
-#if JWT_GNUTLS_NATIVE_JWE
 	/* Native GnuTLS JWK parsing + RSA-OAEP + ECDH-ES (GnuTLS >= 3.8.4). */
 	.process_eddsa		= gnutls_process_eddsa,
+#if defined(LIBJWT_HAVE_ML_DSA) && GNUTLS_VERSION_NUMBER >= 0x03080a
+	.process_mldsa		= gnutls_process_mldsa,
+#endif
 	.process_rsa		= gnutls_process_rsa,
 	.process_ec		= gnutls_process_ec,
 	.process_item_free	= gnutls_process_item_free,
-#else
-	/* Older GnuTLS lacks the SPKI-OAEP / derive-secret APIs, so JWK parsing
-	 * and RSA-OAEP/ECDH-ES fall back to OpenSSL (EVP_PKEY on the JWK). */
-	.process_eddsa		= openssl_process_eddsa,
-	.process_rsa		= openssl_process_rsa,
-	.process_ec		= openssl_process_ec,
-	.process_item_free	= openssl_process_item_free,
-#endif
+	/* Native-key -> JWK conversion, done natively by GnuTLS. */
+	.key2jwk_params		= gnutls_key2jwk_params,
+	.generate_pem		= gnutls_generate_pem,
+
+	.sha			= gnutls_sha,
+	.pbkdf2			= gnutls_pbkdf2_op,
 
 	.jwe_implemented	= 1,
 	.rng			= gnutls_rng,
@@ -440,13 +550,7 @@ struct jwt_crypto_ops jwt_gnutls_ops = {
 	.unwrap_aes_kw		= gnutls_unwrap_aes_kw,
 	.wrap_aes_kw_raw	= gnutls_wrap_aes_kw_raw,
 	.unwrap_aes_kw_raw	= gnutls_unwrap_aes_kw_raw,
-#if JWT_GNUTLS_NATIVE_JWE
 	.encrypt_cek_rsa	= gnutls_encrypt_cek_rsa,
 	.decrypt_cek_rsa	= gnutls_decrypt_cek_rsa,
 	.ecdh_derive		= gnutls_ecdh_derive,
-#else
-	.encrypt_cek_rsa	= openssl_encrypt_cek_rsa,
-	.decrypt_cek_rsa	= openssl_decrypt_cek_rsa,
-	.ecdh_derive		= openssl_ecdh_derive,
-#endif
 };

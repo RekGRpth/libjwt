@@ -1,4 +1,4 @@
-/* Copyright (C) 2025 maClara, LLC <info@maclara-llc.com>
+/* Copyright (C) 2025-2026 maClara, LLC <info@maclara-llc.com>
    This file is part of the JWT C Library
 
    SPDX-License-Identifier:  MPL-2.0
@@ -12,72 +12,35 @@
 #include <gnutls/gnutls.h>
 #include <gnutls/abstract.h>
 
-/* Native GnuTLS JWE needs RSA-OAEP (GnuTLS >= 3.8.4, via the SPKI OAEP API)
- * and raw ECDH (GnuTLS >= 3.8.2, gnutls_privkey_derive_secret). Going native
- * also requires native JWK parsing (the native ops need gnutls key handles in
- * provider_data, not an OpenSSL EVP_PKEY) — and the inverse: the OpenSSL
- * RSA-OAEP/ECDH fallback can only run when JWK parsing produced an EVP_PKEY.
- * So the whole RSA-OAEP+ECDH+JWK-parse trio is gated as ONE unit on the higher
- * of the two thresholds (3.8.4). Below that, the entire path stays on OpenSSL
- * (JWK parse + RSA-OAEP + ECDH), exactly as before this change. */
-#define JWT_GNUTLS_NATIVE_JWE	(GNUTLS_VERSION_NUMBER >= 0x030804)
-
-#if JWT_GNUTLS_NATIVE_JWE
 /* A parsed JWK held as native GnuTLS key handles. This is what a GnuTLS
- * jwk_item_t.provider_data points to (native path only). The pubkey is always
- * present; the privkey only for private keys. The JWE RSA-OAEP and ECDH-ES ops
- * use these directly; JWS sign/verify continue to use item->pem. */
+ * jwk_item_t.provider_data points to. The pubkey is always present; the privkey
+ * only for private keys. The JWE RSA-OAEP and ECDH-ES ops use these directly;
+ * JWS sign/verify continue to use item->pem. */
 typedef struct {
 	jwk_key_type_t kty;
 	gnutls_pubkey_t pub;
 	gnutls_privkey_t priv;	/* NULL for public-only keys */
 } gnutls_jwk_t;
-#endif
 
-/* JWK parsing. On the native path (>= 3.8.4) these build gnutls key handles;
- * otherwise the ops table uses openssl_process_* (declared below). */
-#if JWT_GNUTLS_NATIVE_JWE
+/* JWK parsing: build native GnuTLS key handles into provider_data. */
 JWT_NO_EXPORT
 int gnutls_process_eddsa(jwt_json_t *jwk, jwk_item_t *item);
+#if defined(LIBJWT_HAVE_ML_DSA) && GNUTLS_VERSION_NUMBER >= 0x03080a
+JWT_NO_EXPORT
+int gnutls_process_mldsa(jwt_json_t *jwk, jwk_item_t *item);
+#endif
 JWT_NO_EXPORT
 int gnutls_process_rsa(jwt_json_t *jwk, jwk_item_t *item);
 JWT_NO_EXPORT
 int gnutls_process_ec(jwt_json_t *jwk, jwk_item_t *item);
 JWT_NO_EXPORT
 void gnutls_process_item_free(jwk_item_t *item);
-#endif
 
-/* OpenSSL fallbacks: JWK parsing and RSA-OAEP/ECDH-ES, used when the GnuTLS
- * version predates the native path. Declared unconditionally so the ops table
- * can select them under the version #if. Backend internals; keep out of ABI. */
+/* Native-key -> JWK conversion (the key2jwk_params op); see jwk-export.c. */
 JWT_NO_EXPORT
-int openssl_process_eddsa(jwt_json_t *jwk, jwk_item_t *item);
+int gnutls_key2jwk_params(const char *key, size_t len, jwk_export_t *out);
 JWT_NO_EXPORT
-int openssl_process_rsa(jwt_json_t *jwk, jwk_item_t *item);
-JWT_NO_EXPORT
-int openssl_process_ec(jwt_json_t *jwk, jwk_item_t *item);
-JWT_NO_EXPORT
-void openssl_process_item_free(jwk_item_t *item);
-JWT_NO_EXPORT
-int openssl_encrypt_cek_rsa(jwe_key_alg_t alg, const jwk_item_t *key,
-	const unsigned char *cek, size_t cek_len,
-	unsigned char **out, size_t *out_len);
-JWT_NO_EXPORT
-int openssl_encrypt_cek_rsa_pem(jwe_key_alg_t alg, const char *pem,
-	const unsigned char *cek, size_t cek_len,
-	unsigned char **out, size_t *out_len);
-JWT_NO_EXPORT
-int openssl_decrypt_cek_rsa(jwe_key_alg_t alg, const jwk_item_t *key,
-	const unsigned char *in, size_t in_len,
-	unsigned char **cek, size_t *cek_len);
-JWT_NO_EXPORT
-int openssl_decrypt_cek_rsa_pem(jwe_key_alg_t alg, const char *pem,
-	const unsigned char *in, size_t in_len,
-	unsigned char **cek, size_t *cek_len);
-JWT_NO_EXPORT
-int openssl_ecdh_derive(jwe_key_alg_t alg, jwe_enc_t enc,
-	const jwk_item_t *key, int for_encrypt, jwt_json_t *hdr,
-	unsigned char **dk, size_t *dk_len);
+int gnutls_generate_pem(jwk_key_type_t kty, const char *param, jwt_alg_t alg, char **pem_out, size_t *pem_len);
 
 /* JWE (RFC 7516/7518) — native GnuTLS implementations. Backend internals
  * reached only through the jwt_crypto_ops table; keep out of ABI. */
@@ -126,7 +89,6 @@ int gnutls_unwrap_aes_kw_raw(const unsigned char *kek, size_t kek_len,
 	const unsigned char *in, size_t in_len,
 	unsigned char **cek, size_t *cek_len);
 
-#if JWT_GNUTLS_NATIVE_JWE
 JWT_NO_EXPORT
 int gnutls_encrypt_cek_rsa(jwe_key_alg_t alg, const jwk_item_t *key,
 	const unsigned char *cek, size_t cek_len,
@@ -139,6 +101,5 @@ JWT_NO_EXPORT
 int gnutls_ecdh_derive(jwe_key_alg_t alg, jwe_enc_t enc,
 	const jwk_item_t *key, int for_encrypt, jwt_json_t *hdr,
 	unsigned char **dk, size_t *dk_len);
-#endif
 
 #endif /* JWT_GNUTLS_H */
