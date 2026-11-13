@@ -170,6 +170,16 @@ int FUNC(setkey)(jwt_common_t *__cmd, const jwt_alg_t alg,
 #ifdef JWT_CHECKER
 	/* Setting a single key clears any keyring; the last call wins. */
 	__cmd->c.keyring = NULL;
+
+	/* Once given a key, the checker requires one until the application
+	 * takes it back outside a verify. A callback that does so through its
+	 * ctx (e.g. to "remember" a failed "kid" lookup) only removes the key:
+	 * the tokens after this one would otherwise meet an unkeyed checker,
+	 * and an unsigned one would verify (GHSA-mhc9-xvg5-qg29). */
+	if (key != NULL)
+		__cmd->c.key_required = 1;
+	else if (!__cmd->c.verifying)
+		__cmd->c.key_required = 0;
 #endif
 
 #ifdef JWT_BUILDER
@@ -444,6 +454,30 @@ jwt_value_error_t FUNC(header_get)(jwt_common_t *__cmd, jwt_value_t *value)
 
 jwt_value_error_t FUNC(header_set)(jwt_common_t *__cmd, jwt_value_t *value)
 {
+	/* @rfc{7797,3} "b64" says how the payload is encoded, which only
+	 * jwt_builder_setb64() decides (for every signature alike): refuse it
+	 * by name, or inside a nameless JSON object merged into the header. */
+	if (__cmd != NULL && value != NULL) {
+		jwt_json_auto_t *obj = NULL;
+		int b64 = 0;
+
+		if (value->name != NULL && value->name[0] != '\0') {
+			b64 = !strcmp(value->name, "b64");
+		} else if (value->type == JWT_VALUE_JSON &&
+			   value->json_val != NULL) {
+			obj = jwt_json_parse(value->json_val,
+					     JWT_JSON_REJECT_DUPLICATES, NULL);
+			/* Even as JSON null (see jwt_json_obj_has()). */
+			b64 = jwt_json_obj_has(obj, "b64");
+		}
+
+		if (b64) {
+			jwt_write_error(__cmd, "\"b64\" cannot be set as a "
+					"header: use jwt_builder_setb64()");
+			return value->error = JWT_VALUE_ERR_INVALID;
+		}
+	}
+
 	return __run_it(__cmd, __HEADER, value, __setter);
 }
 
@@ -557,21 +591,92 @@ int FUNC(time_leeway)(jwt_common_t *__cmd, jwt_claims_t claim, time_t secs)
 }
 
 #ifdef JWT_CHECKER
-int FUNC(verify)(jwt_common_t *__cmd, const char *token)
+/* @rfc{7515,7.2.2} A keyring checker verifies a Compact token as the
+ * equivalent one-signature Flattened JWS JSON Serialization, so it gets exactly
+ * what a JSON token gets: a "kid" selects that ring key (no fallback), a
+ * kid-less token is tried against every compatible key, each under the
+ * alg/key-type binding and the key's "alg" pin; the typ/alg policy,
+ * per-signature callback, claims, required claims and jti all apply; and
+ * "none" is never accepted. The Compact path below only knows the single key,
+ * which jwt_checker_setkeyring() clears, so it would treat the checker as
+ * unkeyed and accept a forged unsigned token (GHSA-mhc9-xvg5-qg29).
+ *
+ * "protected" is the text before the FIRST '.', "signature" the text after the
+ * LAST '.', and "payload" everything between, so an @rfc{7797} unencoded
+ * payload containing '.' stays intact. The JSON is built with the JSON API,
+ * never by formatting a string: a raw payload may hold quotes or backslashes
+ * and must not be able to add members. Returns a malloc'd string, or NULL with
+ * the checker error set. */
+static char *compact_to_flattened(jwt_checker_t *checker, const char *token)
+{
+	static const char * const names[] = {
+		"protected", "payload", "signature",
+	};
+	jwt_json_auto_t *root = NULL;
+	char_auto *buf = NULL;
+	const char *parts[ARRAY_SIZE(names)];
+	char *first, *last, *out;
+	size_t i, len = strlen(token) + 1;
+
+	buf = jwt_malloc(len);
+	if (buf == NULL) {
+		jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
+		return NULL; // LCOV_EXCL_LINE
+	}
+	memcpy(buf, token, len);
+
+	first = strchr(buf, '.');
+	last = strrchr(buf, '.');
+	if (first == NULL || first == last) {
+		jwt_write_error(checker, "Invalid JWS Compact Serialization");
+		return NULL;
+	}
+	*first = '\0';
+	*last = '\0';
+	parts[0] = buf;
+	parts[1] = first + 1;
+	parts[2] = last + 1;
+
+	root = jwt_json_create();
+	if (root == NULL) {
+		jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
+		return NULL; // LCOV_EXCL_LINE
+	}
+
+	for (i = 0; i < ARRAY_SIZE(names); i++) {
+		jwt_json_t *v = jwt_json_create_str(parts[i]);
+
+		/* Jansson refuses a string that is not valid UTF-8 (json-c
+		 * takes any bytes), e.g. a binary unencoded payload. */
+		if (v == NULL) {
+			jwt_write_error(checker, "Token is not valid UTF-8");
+			return NULL;
+		}
+		/* obj_set consumes @v even when it fails. */
+		if (jwt_json_obj_set(root, names[i], v)) {
+			jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
+			return NULL; // LCOV_EXCL_LINE
+		}
+	}
+
+	out = jwt_json_serialize(root, JWT_JSON_COMPACT);
+	if (out == NULL)
+		jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
+
+	return out;
+}
+
+static int __verify(jwt_common_t *__cmd, const char *token)
 {
 	JWT_CONFIG_DECLARE(config);
 	unsigned int payload_len;
 	jwt_auto_t *jwt = NULL;
+	int keyed, had_cb;
 
-	if (__cmd == NULL)
-		return 1;
-
-	if (token == NULL || !strlen(token)) {
-		jwt_write_error(__cmd, "Must pass a token");
-		return 1;
-	}
-
-	/* Clear any signature state from a prior verify (checker reuse). */
+	/* Report only this call (checker reuse): jwt_write_error() keeps the
+	 * first message, so a prior verify's error would mask this one's, and
+	 * its signatures must not be reported for this one either. */
+	FUNC(error_clear)(__cmd);
 	{
 		struct jwt_signature *s, *tmp;
 
@@ -590,6 +695,11 @@ int FUNC(verify)(jwt_common_t *__cmd, const char *token)
 		}
 	}
 
+	if (token == NULL || !strlen(token)) {
+		jwt_write_error(__cmd, "Must pass a token");
+		return 1;
+	}
+
 	/* @rfc{7515,7.2} A token whose first non-whitespace byte is '{' is a
 	 * JWS JSON Serialization; otherwise it is the Compact form. */
 	{
@@ -599,6 +709,19 @@ int FUNC(verify)(jwt_common_t *__cmd, const char *token)
 			p++;
 		if (*p == '{')
 			return jwt_verify_json(__cmd, token);
+	}
+
+	/* A keyring checker verifies a Compact token as its one-signature JSON
+	 * equivalent (see compact_to_flattened()), never on the single-key path
+	 * below. Embedded-JWK verify keeps its own Compact flow and, as before,
+	 * takes precedence over a keyring. */
+	if (__cmd->c.keyring != NULL && !__cmd->c.embedded_jwk) {
+		char_auto *flat = compact_to_flattened(__cmd, token);
+
+		if (flat == NULL)
+			return 1;
+
+		return jwt_verify_json(__cmd, flat);
 	}
 
 	jwt = jwt_new();
@@ -638,9 +761,37 @@ int FUNC(verify)(jwt_common_t *__cmd, const char *token)
 		config.alg = jwt->alg;
 	}
 
+	/* Noted before the callback runs, since it can reconfigure this very
+	 * checker through its ctx (jwt_checker_setkey(), _setkeyring(),
+	 * _setcb()). */
+	keyed = config.key != NULL;
+	had_cb = __cmd->c.cb != NULL;
+
 	/* Let the user handle this and update config */
         if (__cmd->c.cb && __cmd->c.cb(jwt, &config)) {
 		jwt_write_error(__cmd, "User callback returned error");
+		return 1;
+	}
+
+	/* A checker given a key (jwt_checker_setkey(), or a header key confirmed
+	 * for embedded-JWK verify) always verifies with one: the callback may
+	 * replace the key, never remove it. config.alg can be JWT_ALG_NONE here
+	 * (setkey() with JWT_ALG_NONE takes the key's "alg"; embedded-JWK takes
+	 * the token's own), and with no key as well, the checks below would treat
+	 * the checker as unkeyed and accept an unsigned ("alg":"none") token,
+	 * e.g. when a "kid" lookup in the callback finds nothing
+	 * (GHSA-mhc9-xvg5-qg29). The same holds if the callback gave the checker
+	 * a key or keyring of its own while leaving this token without one, and
+	 * if a callback (this one or an earlier verify's) has since removed the
+	 * key the checker was given: see FUNC(setkey). */
+	if ((keyed || __cmd->c.key != NULL || __cmd->c.keyring != NULL ||
+	     __cmd->c.embedded_jwk || __cmd->c.key_required) &&
+	    config.key == NULL) {
+		/* With no verify callback, only a callback's earlier removal of
+		 * the key (see FUNC(setkey)) gets here. */
+		jwt_write_error(__cmd, "%s", had_cb ?
+				"Callback left no verification key" :
+				"A callback removed the checker's key");
 		return 1;
 	}
 
@@ -681,6 +832,28 @@ int FUNC(verify)(jwt_common_t *__cmd, const char *token)
 	return __cmd->error;
 }
 
+int FUNC(verify)(jwt_common_t *__cmd, const char *token)
+{
+	int ret;
+
+	if (__cmd == NULL)
+		return 1;
+
+	/* Not from this checker's own callbacks: the token being verified
+	 * still uses the signatures and embedded key a new verify frees. */
+	if (__cmd->c.verifying) {
+		jwt_write_error(__cmd, "Checker is already verifying a token");
+		return 1;
+	}
+
+	/* Its callbacks run inside; see FUNC(setkey). */
+	__cmd->c.verifying++;
+	ret = __verify(__cmd, token);
+	__cmd->c.verifying--;
+
+	return ret;
+}
+
 int jwt_checker_setkeyring(jwt_checker_t *checker, const jwk_set_t *keyring,
 			   jwt_verify_policy_t policy)
 {
@@ -702,6 +875,7 @@ int jwt_checker_setkeyring(jwt_checker_t *checker, const jwk_set_t *keyring,
 	checker->c.alg = JWT_ALG_NONE;
 	checker->c.keyring = keyring;
 	checker->c.policy = policy;
+	checker->c.key_required = 1;
 
 	return 0;
 }
@@ -898,7 +1072,10 @@ static const struct jwt_signature *checker_sig_at(const jwt_checker_t *checker,
 	const struct jwt_signature *s;
 	unsigned int i = 0;
 
-	if (checker == NULL || checker->c.signatures.next == NULL)
+	/* Only the last call's signatures: an early failure (e.g. in
+	 * jwt_checker_verify_detached()) resets the count, not the list. */
+	if (checker == NULL || checker->c.signatures.next == NULL ||
+	    index >= checker->c.last_sig_count)
 		return NULL;
 
 	list_for_each_entry(s, &checker->c.signatures, node) {
@@ -906,7 +1083,8 @@ static const struct jwt_signature *checker_sig_at(const jwt_checker_t *checker,
 			return s;
 	}
 
-	return NULL;
+	/* Only if recording the Compact path's signature failed. */
+	return NULL; // LCOV_EXCL_LINE
 }
 
 unsigned int jwt_checker_sig_count(const jwt_checker_t *checker)
@@ -1138,6 +1316,34 @@ char *FUNC(generate)(jwt_common_t *__cmd)
 	jwt->payload_raw = __cmd->c.payload_raw;
 	jwt->payload_raw_len = __cmd->c.payload_raw_len;
 
+	/* @rfc{7797,3} "b64" is jwt_builder_setb64()'s alone (header_set
+	 * refuses it), but the callback can still set one with
+	 * jwt_header_set(). Refuse one that disagrees with the setting: the
+	 * token would claim an encoding its payload does not have, and a JWT
+	 * would slip past the b64=false guard below. A JSON null disagrees
+	 * too, though json-c's jwt_json_obj_get() gives NULL for it. */
+	{
+		jwt_json_t *jb = jwt_json_obj_get(jwt->headers, "b64");
+
+		if (jwt_json_obj_has(jwt->headers, "b64") &&
+		    (!jwt_json_is_bool(jb) ||
+		     (jwt_json_is_true(jb) ? 1 : 0) != jwt->b64)) {
+			jwt_write_error(__cmd, "A \"b64\" header must match "
+					"jwt_builder_setb64()");
+			return NULL;
+		}
+	}
+
+	/* @rfc{7515,4.1.11} Likewise a "crit" that is JSON null: with json-c,
+	 * jwt_json_obj_get() gives NULL for it, as for no "crit" at all, so
+	 * jwt_apply_b64_header() and jwt_write_crit() below would replace it
+	 * or emit it, where with Jansson they refuse it as not an array. */
+	if (jwt_json_obj_has(jwt->headers, "crit") &&
+	    jwt_json_obj_get(jwt->headers, "crit") == NULL) {
+		jwt_write_error(__cmd, "\"crit\" header must be an array");
+		return NULL;
+	}
+
 	if (!jwt->b64) {
 		/* RFC 7797 forbids b64=false for JWTs (JSON claim sets), so it
 		 * is only valid over a raw payload. */
@@ -1193,6 +1399,21 @@ char *FUNC(generate)(jwt_common_t *__cmd)
 		jwt_write_error(__cmd,
 			"Compact serialization cannot carry multiple signatures");
 		return NULL;
+	}
+
+	/* That signature is the jwt_builder_setkey() signer, which setkey()
+	 * mirrors into the first node. A lone node that does not match it was
+	 * added with jwt_builder_add_signature(): the token would be emitted
+	 * without that signer (unsigned, when setkey() was never called), so
+	 * refuse it instead of dropping it. */
+	if (__cmd->c.n_signatures == 1) {
+		struct jwt_signature *s = jwt_signature_first(&__cmd->c);
+
+		if (s->alg != __cmd->c.alg || s->key != __cmd->c.key) {
+			jwt_write_error(__cmd, "Compact serialization cannot "
+				"carry a jwt_builder_add_signature() signer");
+			return NULL;
+		}
 	}
 
 	if (jwt_head_setup(jwt))

@@ -93,14 +93,20 @@ form with one or more signatures.
 Select the form with `jwt_builder_set_format()`; add extra signers (each with
 its own algorithm and per-signature protected/unprotected header) with
 `jwt_builder_add_signature()`. The same payload is signed independently by each
-signer, so signatures may use different algorithms (e.g. RS256 + ES256).
+signer, so signatures may use different algorithms (e.g. RS256 + ES256). A
+Compact token carries only the `jwt_builder_setkey()` signer.
 
 To verify a multi-signature token, supply a set of candidate keys (a JWKS) with
 `jwt_checker_setkeyring()` and a policy: `JWT_VERIFY_POLICY_ANY` (the default —
 accept if at least one signature verifies, e.g. multi-issuer or key rotation) or
-`JWT_VERIFY_POLICY_ALL` (every signature must verify, e.g. co-signing). A
-signature naming a `kid` is matched to that key; a keyless one is tried against
-every compatible key, always under the usual algorithm/key-type binding.
+`JWT_VERIFY_POLICY_ALL` (every signature must verify, e.g. co-signing). Only
+keys meant for signatures are candidates: a key whose `use` is not `sig`, or
+whose `key_ops` names neither `verify` nor `sign`, is skipped. A signature
+naming a `kid` (which must be a string) is verified only against that key (there
+is no fallback); a keyless one is tried against every candidate, always under
+the usual algorithm/key-type binding and the key's own `alg`, if it has one. A
+keyring verifies Compact tokens the same way, as a JWS with one signature (which
+meets either policy), and never accepts an unsigned (`alg:none`) token.
 `jwt_checker_verify()` auto-detects Compact vs JSON input.
 
 ##### Unencoded and detached payloads (RFC 7797)
@@ -113,7 +119,20 @@ signatures or JAdES/eIDAS detached signatures — set the payload bytes with
 raw payload), and `jwt_builder_set_detached()` omits the payload from the output.
 A detached token is verified with `jwt_checker_verify_detached()`, supplying the
 payload out-of-band. As mandated by RFC 7797 §6, the checker rejects a
-`"b64":false` token unless `"b64"` appears in `"crit"`.
+`"b64":false` token unless `"b64"` appears in `"crit"`. It also rejects a JWS
+JSON token whose signatures disagree on `"b64"` (§3), or that carries `"b64"`
+or `"crit"` in an unprotected header (RFC 7515 §4.1.11). An unencoded payload
+is never JWT claims (§7): it is checked as an empty claim set, so a checker
+that pins `"iss"`/`"sub"`/`"aud"`, requires claims or checks `"jti"` rejects it:
+`Claims cannot be validated on an unencoded ("b64":false) payload (RFC 7797)`.
+Verify unencoded documents with a separate checker that does none of these.
+Likewise, the builder sets `"b64"` only through `jwt_builder_setb64()`, alike in
+every signature, and never emits `"b64"` or `"crit"` unprotected.
+
+The checker reads a base64url payload as JWT claims, so an opaque document is
+verified only in the unencoded form, which cannot carry a NUL byte (the builder
+refuses to sign one and the checker rejects one). LibJWT can therefore sign a
+document that contains NUL bytes, base64url-encoded, but cannot verify it.
 
 #### Key generation
 
