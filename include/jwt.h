@@ -525,8 +525,10 @@ void jwt_builder_error_clear(jwt_builder_t *builder);
  * ``alg-A`` | ``alg-B``  | \emoji :x:
  * ``alg-A`` | ``NULL``   | \emoji :x:
  *
- * @warning The warning represents an insecure token. Using insecure tokens is
- * not very useful and strongly discouraged.
+ * @warning The warning represents an insecure (unsigned, ``"alg":"none"``)
+ * token. Producing one is rarely useful and strongly discouraged, and a
+ * jwt_checker_t rejects it by default: the verifier must opt in by listing
+ * ::JWT_ALG_NONE in jwt_checker_setalgs() to accept it (@rfc{8725} §3.2).
  *
  * A key that is in error (jwks_item_error()) is refused, whatever @p alg is,
  * and the builder keeps the key it has. A builder that has none is not left to
@@ -1031,20 +1033,24 @@ void jwt_checker_error_clear(jwt_checker_t *checker);
  *
  * A signature, of a Compact token or of a JWS JSON Serialization alike,
  * verifies only if it uses exactly that algorithm (with ::JWT_ALG_NONE, the
- * key's ``"alg"``), not merely one the key could check (e.g. RS512 or PS256
- * when pinned to RS256). A verify callback that sets config->alg pins that
- * algorithm instead. The key is used whatever its ``"use"`` or
- * ``"key_ops"``, unlike the keys of a keyring (see jwt_checker_setkeyring()),
- * but a key that is in error (jwks_item_error()) is refused. The checker keeps
- * the key or keyring it has, and one that has neither is not left unkeyed: it
- * rejects every token, an unsigned one included, until it is given a key or
- * keyring, its verify callback supplies the key, or this is called with a
- * NULL key.
+ * key's ``"alg"``, and a key with none verifies nothing), not merely one the
+ * key could check (e.g. RS512 or PS256 when pinned to RS256). A verify
+ * callback that sets config->alg pins that algorithm instead. The key is
+ * used whatever its ``"use"`` or ``"key_ops"``, unlike the keys of a
+ * keyring (see jwt_checker_setkeyring()), but a key that is in error
+ * (jwks_item_error()) is refused. The checker keeps the key or keyring it
+ * has, and one that has neither is not left unkeyed: it rejects every
+ * token, an unsigned one included, until it is given a key or keyring,
+ * its verify callback supplies the key, or this is called with a NULL
+ * key (which leaves it unkeyed; see below).
  *
  * A NULL key (with ::JWT_ALG_NONE) also drops a keyring. Unless embedded-JWK
  * verification is enabled (this does not turn it off), the checker is then
- * unkeyed: it verifies no JWS JSON Serialization, and of Compact tokens only
- * unsigned (``"alg":"none"``) ones, unless a verify callback supplies a key.
+ * unkeyed: it verifies no JWS JSON Serialization, and no Compact token unless a
+ * verify callback supplies a key. An unsigned (``"alg":"none"``) Compact token
+ * is the one kind an unkeyed checker can still verify, but only once unsigned
+ * tokens are allowed by listing ::JWT_ALG_NONE in jwt_checker_setalgs();
+ * otherwise it, too, is rejected (@rfc{8725} §3.2).
  *
  * Called from a verify or jti callback, though, it only removes the key: a
  * checker that was given a key or keyring still requires one, so every later
@@ -1108,7 +1114,9 @@ typedef enum {
  * an unsigned (``"alg":"none"``) token is never accepted. The callback may
  * supply the key, which is then the only one tried, whatever its ``"use"`` or
  * ``"key_ops"`` (unless it is in error: then none is); if it sets
- * config->alg, a signature with another ``"alg"`` does not verify.
+ * config->alg, a signature with another ``"alg"`` does not verify, and if it
+ * sets it to ::JWT_ALG_NONE each candidate is pinned to the candidate's own
+ * ``"alg"`` (a candidate without one then verifies nothing).
  *
  * A ring key is not tied to an issuer: when the ring holds the keys of several
  * issuers, a token without a ``kid`` verifies with whichever of them signed
@@ -1185,6 +1193,16 @@ int jwt_checker_expect_typ(jwt_checker_t *checker, const char *typ);
  * e.g. ``{JWT_ALG_RS256, JWT_ALG_ES256}``. A token whose ``"alg"`` is not in the
  * set is rejected, which also blocks an ``alg:none`` downgrade. Passing @p n as
  * 0 (or @p algs as NULL) clears the allowlist.
+ *
+ * With no allowlist set (the default, or once cleared) any signed algorithm is
+ * accepted, but an unsigned (``"alg":"none"``) token is not: accepting one is
+ * opt-in (@rfc{8725} §3.2). List ::JWT_ALG_NONE here (alone, or alongside the
+ * signed algorithms) to accept unsigned tokens; a signed-only set keeps them
+ * out, as it always has. This is the supported way to consume unsigned tokens
+ * on purpose, and the only one.
+ *
+ * @note Before 3.7.0 a checker with no key, keyring or allowlist accepted an
+ * unsigned token by default; now that too requires the ::JWT_ALG_NONE opt-in.
  *
  * @param checker Pointer to a checker object
  * @param algs An array of acceptable ::jwt_alg_t values (copied)
@@ -1339,7 +1357,8 @@ int jwt_checker_enable_embedded_jwk_keyring(jwt_checker_t *checker,
  * algorithm given to jwt_checker_setkey(), if any, or else that signature's
  * own ``"alg"``, and the signature verifies only if its ``"alg"`` is the one
  * in config->alg when the callback returns (for ::JWT_ALG_NONE, the key's
- * ``"alg"``, if it has one). A non-zero return only leaves that signature
+ * ``"alg"``, if it has one, and nothing if it has none, just as on the
+ * single-key Compact path). A non-zero return only leaves that signature
  * unverified, for the ::jwt_verify_policy_t to decide: under
  * ::JWT_VERIFY_POLICY_ANY the token is still accepted if another of its
  * signatures verifies, and under ::JWT_VERIFY_POLICY_ALL it is rejected. A
@@ -1360,13 +1379,18 @@ int jwt_checker_enable_embedded_jwk_keyring(jwt_checker_t *checker,
  *   sets is the only one tried; a NULL key lets a signature without a ``kid``
  *   be tried against every compatible candidate.
  * - Otherwise it is NULL. If the callback leaves it so, and has not given the
- *   checker a key or keyring, only an unsigned (``"alg":"none"``) token can
- *   verify.
+ *   checker a key or keyring, no token verifies -- not even an unsigned
+ *   (``"alg":"none"``) one, unless unsigned tokens were allowed by listing
+ *   ::JWT_ALG_NONE in jwt_checker_setalgs() (@rfc{8725} §3.2, issue #352).
  *
- * @warning In that last case a forged unsigned token is accepted, so a
- * callback that selects the key (e.g. by ``kid``) on a checker without a key,
- * keyring or embedded-JWK verification must return non-zero when it finds
- * none, or set config->alg.
+ * @warning A callback that selects the key (e.g. by ``kid``) on a checker with
+ * no key, keyring or embedded-JWK verification fails closed when it finds none:
+ * leaving config->key NULL rejects the token rather than accepting it unsigned.
+ * Returning non-zero (or setting config->alg) still makes the intent explicit.
+ * Only a checker that opted in to unsigned tokens (::JWT_ALG_NONE in
+ * jwt_checker_setalgs()) accepts a forged ``"alg":"none"`` token here, which is
+ * then the application's deliberate choice. Before 3.7.0 such a token was
+ * accepted by default (GHSA-mhc9-xvg5-qg29 for the keyed/keyring variants).
  *
  * The ctx value is also passed to the callback as part of the jwt_config_t
  * struct.
@@ -1384,6 +1408,12 @@ int jwt_checker_enable_embedded_jwk_keyring(jwt_checker_t *checker,
  * @note Calling this with a NULL cb param and a new ctx param after already
  * setting the callback will allow updating the ctx passed to the callback.
  * Calling with both values as NULL will disable the callback completely.
+ *
+ * @note Before 3.7.0 a verify callback that set config->alg to ::JWT_ALG_NONE
+ * unpinned the algorithm on the JWS JSON Serialization path (and on a Compact
+ * token checked against a keyring, which takes that path): any algorithm of
+ * the key's type then verified, instead of the key's own ``"alg"`` (or
+ * nothing, for a key without one) as on the single-key Compact path (#353).
  *
  * @param checker Pointer to a checker object
  * @param cb Pointer to a callback function
@@ -2632,9 +2662,10 @@ int jwe_builder_set_format(jwe_builder_t *builder, jwe_serialization_t format);
  *
  * @p value_json is parsed as JSON, so a string value must include its quotes
  * (the four-byte fragment quote-p-r-o-d-quote for the string @c prod); objects,
- * arrays, numbers and booleans are accepted as written. The same parameter name
- * must not also appear in the shared unprotected or any per-recipient header
- * (@rfc{7516,7.2.1}).
+ * arrays, numbers and booleans are accepted as written. A bare ``null`` is
+ * refused (the json-c backend cannot store one, so both backends refuse it
+ * alike). The same parameter name must not also appear in the shared
+ * unprotected or any per-recipient header (@rfc{7516,7.2.1}).
  *
  * @param builder Pointer to a JWE builder object
  * @param key The header parameter name

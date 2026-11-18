@@ -41,7 +41,9 @@ Decode and (optionally) verify the signature for a JSON Web Token\n\
   -h, --help            This help information\n\
   -l, --list            List supported algorithms and exit\n\
   -a, --algorithm=ALG   JWT algorithm to use (e.g. ES256). Only needed if the key\n\
-                        provided with -k does not have an \"alg\" attribute\n\
+                        provided with -k does not have an \"alg\" attribute. With\n\
+                        no key, \"-a none\" accepts an unsigned (\"alg\":\"none\")\n\
+                        token; without it such a token is rejected\n\
   -p, --print=CMD       When printing JSON, pipe through CMD (requires -v)\n\
   -k, --key=FILE        Filename containing a JSON Web Key\n\
   -r, --keyring=FILE    Filename containing a JWKS to verify against (RFC 7515),\n\
@@ -57,8 +59,9 @@ If - is given as the only argument to token, then tokens will be read\n\
 from stdin, one per line.\n\
 \n\
 The exit status is 0 if every token was verified (its signature checked\n\
-with -k or -r; with neither, an unsigned token is only decoded). It is 1\n\
-if any token failed, or if there was no token to verify.\n\
+with -k or -r). With neither, a token is rejected unless it is unsigned and\n\
+\"-a none\" was given, which decodes it without checking a signature. It is\n\
+1 if any token failed, or if there was no token to verify.\n\
 \n\
 -h and -l verify nothing and exit 0 only when given alone. An argument that\n\
 starts with - is read as an option unless it comes after --. To check a\n\
@@ -231,12 +234,6 @@ int main(int argc, char *argv[])
 		{ NULL, 0, 0, 0 },
 	};
 
-	checker = jwt_checker_new();
-	if (checker == NULL) {
-		fprintf(stderr, "Could not allocate checker context\n");
-		exit(EXIT_FAILURE);
-	}
-
 	while ((oc = getopt_long(argc, argv, optstr, opttbl, NULL)) != -1) {
 		switch (oc) {
 		case 'h':
@@ -348,18 +345,34 @@ int main(int argc, char *argv[])
 	if (pipe_cmd && !verbose)
 		usage("--print requires --verbose", EXIT_FAILURE);
 
+	/* Allocate the checker only now, after all option parsing and the
+	 * usage() checks above, so those exit() paths leave nothing allocated
+	 * (allocate after option parsing, as the jwe-* tools do). Every error
+	 * path from here returns (not exit()) so the *_auto_t cleanups for the
+	 * checker, jwk_set and keyring run. */
+	checker = jwt_checker_new();
+	if (checker == NULL) {
+		// LCOV_EXCL_START
+		fprintf(stderr, "Could not allocate checker context\n");
+		return EXIT_FAILURE;
+		// LCOV_EXCL_STOP
+	}
+
 	/* Load a keyring (a JWKS) for multi-signature verification. */
 	if (keyring_file) {
 		keyring = jwks_create_fromfile(keyring_file);
 		if (keyring == NULL || jwks_error(keyring)) {
 			fprintf(stderr, "ERR: Could not read keyring: %s\n",
 				jwks_error_msg(keyring));
-			exit(EXIT_FAILURE);
+			return EXIT_FAILURE;
 		}
 		if (jwt_checker_setkeyring(checker, keyring, policy)) {
+			// LCOV_EXCL_START - defensive: a keyring that read
+			// cleanly but setkeyring then rejects
 			fprintf(stderr, "ERR setting keyring: %s\n",
 				jwt_checker_error_msg(checker));
-			exit(EXIT_FAILURE);
+			return EXIT_FAILURE;
+			// LCOV_EXCL_STOP
 		}
 		if (!quiet)
 			printf("\xF0\x9F\x94\x91 \033[0;92m[RING]\033[0m %s "
@@ -373,38 +386,62 @@ int main(int argc, char *argv[])
                 if (jwk_set == NULL || jwks_error(jwk_set)) {
                         fprintf(stderr, "ERR: Could not read JWK: %s\n",
                                 jwks_error_msg(jwk_set));
-                        exit(EXIT_FAILURE);
+                        return EXIT_FAILURE;
                 }
 
                 /* Get the first key */
                 item = jwks_item_get(jwk_set, 0);
                 if (item == NULL) {
                         fprintf(stderr, "ERR: No key found in %s\n", key_file);
-                        exit(EXIT_FAILURE);
+                        return EXIT_FAILURE;
                 }
                 if (jwks_item_error(item)) {
                         fprintf(stderr, "ERR: Could not read JWK: %s\n",
                                 jwks_item_error_msg(item));
-                        exit(EXIT_FAILURE);
+                        return EXIT_FAILURE;
                 }
 
 		if (jwks_item_alg(item) == JWT_ALG_NONE &&
 		    alg == JWT_ALG_NONE) {
-			usage("Key does not contain an \"alg\" attribute and no --alg given",
-			      EXIT_FAILURE);
+			fprintf(stderr, "ERR: Key does not contain an \"alg\" "
+				"attribute and no --algorithm given\n");
+			return EXIT_FAILURE;
 		}
 
                 if (jwt_checker_setkey(checker, alg, item)) {
                         fprintf(stderr, "ERR Loading key: %s\n",
                                 jwt_checker_error_msg(checker));
-                        exit(EXIT_FAILURE);
+                        return EXIT_FAILURE;
                 }
 	}
 
+	/* With neither a key nor a keyring the checker is keyless and, by
+	 * default, rejects every token -- an unsigned ("alg":"none") one
+	 * included (RFC 8725 §3.2). An explicit "-a none" is how the caller
+	 * opts in to unsigned tokens, the one thing a keyless checker still
+	 * accepts (it only decodes them). Wire it to the allowlist so the
+	 * library applies the policy. */
+	if (key_file == NULL && keyring_file == NULL && alg_given &&
+	    alg == JWT_ALG_NONE) {
+		const jwt_alg_t none_alg[] = { JWT_ALG_NONE };
+
+		if (jwt_checker_setalgs(checker, none_alg, 1)) {
+			// LCOV_EXCL_START - defensive: setalgs with a valid
+			// algorithm on a fresh checker does not fail
+			fprintf(stderr, "ERR allowing unsigned tokens: %s\n",
+				jwt_checker_error_msg(checker));
+			return EXIT_FAILURE;
+			// LCOV_EXCL_STOP
+		}
+	}
+
 	if (verbose && jwt_checker_setcb(checker, __jwt_wcb, NULL)) {
+		// LCOV_EXCL_START - defensive: setting our own static callback
+		// does not fail in practice
 		fprintf(stderr, "ERR setting callback: %s\n",
 			jwt_checker_error_msg(checker));
-		exit(EXIT_FAILURE);
+		return EXIT_FAILURE;
+		// LCOV_EXCL_STOP
 	}
 
 	if (item && !quiet) {
@@ -454,7 +491,8 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	/* Not the number of failures: an exit status keeps only 8 bits. */
-	exit(err ? EXIT_FAILURE : EXIT_SUCCESS);
+	/* Not the number of failures: an exit status keeps only 8 bits.
+	 * Return (not exit()) so the checker/key-set auto_t cleanups run. */
+	return err ? EXIT_FAILURE : EXIT_SUCCESS;
 }
 

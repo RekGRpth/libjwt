@@ -328,6 +328,108 @@ START_TEST(test_jwks_okp_x25519_bad_d_len)
 }
 END_TEST
 
+/* @rfc{7518,6.2.2.1} An EC private JWK's "d" must be the private key for its
+ * public point (x, y): 1 <= d < n and d*G == (x, y). A "d" that is out of
+ * range or simply the wrong scalar used to load on one or more backends; every
+ * backend must now reject it. The x/y below are ec_key_prime256v1.json's real
+ * public point and only "d" is tampered with. The failure message is backend-
+ * and input-specific, so these assert the error flag only. */
+START_TEST(test_jwks_ec_private_d_zero)
+{
+	/* d = 0 (32 zero bytes): out of range, needs 1 <= d < n. */
+	const char *json = "{\"kty\":\"EC\",\"crv\":\"P-256\","
+		"\"x\":\"Y--DdSpCZ5oF3j__h-SdNJIwvB5aI4AXzpRErGUjWrM\","
+		"\"y\":\"_bSTCXlDeU-pZZbOKDUVLANspSIeuKZfTM8rtXFG_RU\","
+		"\"d\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"}";
+	jwk_set_t *jwk_set = NULL;
+	const jwk_item_t *item;
+
+	SET_OPS();
+
+	jwk_set = jwks_create(json);
+	ck_assert_ptr_nonnull(jwk_set);
+
+	item = jwks_item_get(jwk_set, 0);
+	ck_assert_ptr_nonnull(item);
+	ck_assert_int_ne(jwks_item_error(item), 0);
+
+	jwks_free(jwk_set);
+}
+END_TEST
+
+/* As above, d = n (the P-256 group order): out of range, needs d < n. */
+START_TEST(test_jwks_ec_private_d_order)
+{
+	const char *json = "{\"kty\":\"EC\",\"crv\":\"P-256\","
+		"\"x\":\"Y--DdSpCZ5oF3j__h-SdNJIwvB5aI4AXzpRErGUjWrM\","
+		"\"y\":\"_bSTCXlDeU-pZZbOKDUVLANspSIeuKZfTM8rtXFG_RU\","
+		"\"d\":\"_____wAAAAD__________7zm-q2nF56E87nKwvxjJVE\"}";
+	jwk_set_t *jwk_set = NULL;
+	const jwk_item_t *item;
+
+	SET_OPS();
+
+	jwk_set = jwks_create(json);
+	ck_assert_ptr_nonnull(jwk_set);
+
+	item = jwks_item_get(jwk_set, 0);
+	ck_assert_ptr_nonnull(item);
+	ck_assert_int_ne(jwks_item_error(item), 0);
+
+	jwks_free(jwk_set);
+}
+END_TEST
+
+/* As above, d = 1: in range but not the private key for (x, y). */
+START_TEST(test_jwks_ec_private_d_mismatch)
+{
+	const char *json = "{\"kty\":\"EC\",\"crv\":\"P-256\","
+		"\"x\":\"Y--DdSpCZ5oF3j__h-SdNJIwvB5aI4AXzpRErGUjWrM\","
+		"\"y\":\"_bSTCXlDeU-pZZbOKDUVLANspSIeuKZfTM8rtXFG_RU\","
+		"\"d\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE\"}";
+	jwk_set_t *jwk_set = NULL;
+	const jwk_item_t *item;
+
+	SET_OPS();
+
+	jwk_set = jwks_create(json);
+	ck_assert_ptr_nonnull(jwk_set);
+
+	item = jwks_item_get(jwk_set, 0);
+	ck_assert_ptr_nonnull(item);
+	ck_assert_int_ne(jwks_item_error(item), 0);
+
+	jwks_free(jwk_set);
+}
+END_TEST
+
+/* As above but P-521 (ec_key_secp521r1.json's x/y) with d = 1, to exercise the
+ * 66-byte coordinate comparison in the MbedTLS backend. */
+START_TEST(test_jwks_ec_private_d_mismatch_p521)
+{
+	const char *json = "{\"kty\":\"EC\",\"crv\":\"P-521\","
+		"\"x\":\"_axE26pXWXesAjcTP_2Tfe4EcF4A3LuqgpIFzrftiztViq0-5deUvfcxuP"
+		"IFk-ANVinlAOzgZWpFS0kheI7KJAY\","
+		"\"y\":\"3fOHn5ZTU08AAjau0CoZe9GSPUC4cnSy1nqetiKBW0YpBvhaY5FXnngvfHU"
+		"HdmkFSVLCS6N-LXoi_dm0Fbo6snE\","
+		"\"d\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAB\"}";
+	jwk_set_t *jwk_set = NULL;
+	const jwk_item_t *item;
+
+	SET_OPS();
+
+	jwk_set = jwks_create(json);
+	ck_assert_ptr_nonnull(jwk_set);
+
+	item = jwks_item_get(jwk_set, 0);
+	ck_assert_ptr_nonnull(item);
+	ck_assert_int_ne(jwks_item_error(item), 0);
+
+	jwks_free(jwk_set);
+}
+END_TEST
+
 /* RSA JWK with partial private key (some but not all components) */
 START_TEST(test_jwks_rsa_partial_private_key)
 {
@@ -739,6 +841,9 @@ START_TEST(test_jwt_alg_none_empty)
 
 	checker = jwt_checker_new();
 	ck_assert_ptr_nonnull(checker);
+
+	/* An unsigned token verifies only with the opt-in (issue #352). */
+	checker_allow_none(checker);
 
 	/* {"alg":"none"} . {} . (empty sig) */
 	ret = jwt_checker_verify(checker,
@@ -1314,6 +1419,9 @@ START_TEST(test_dup_members_rejected)
 	checker = jwt_checker_new();
 	ck_assert_ptr_nonnull(checker);
 	ck_assert_int_eq(jwt_checker_setkey(checker, JWT_ALG_NONE, NULL), 0);
+	/* These are unsigned tokens; the duplicate-member check is what is
+	 * under test, so opt in past the unsigned-token default (issue #352). */
+	checker_allow_none(checker);
 
 	ret = jwt_checker_verify(checker, dup_hdr);
 #ifdef HAVE_JSON_C
@@ -1348,6 +1456,7 @@ START_TEST(test_missing_exp_passes)
 	checker = jwt_checker_new();
 	ck_assert_ptr_nonnull(checker);
 	ck_assert_int_eq(jwt_checker_setkey(checker, JWT_ALG_NONE, NULL), 0);
+	checker_allow_none(checker);	/* unsigned token (issue #352) */
 
 	/* The default checker enables EXP/NBF, but a token lacking them is
 	 * accepted (absence is not a failure). */
@@ -1452,18 +1561,24 @@ START_TEST(test_callback_cannot_strip_key)
 			ck_assert_int_ne(jwt_checker_verify(c, signed_tok), 0);
 			ck_assert_str_eq(jwt_checker_error_msg(c), nokey);
 
-			/* Replacing the key is still allowed. */
+			/* Replacing the key is still allowed. The forged
+			 * unsigned token is now turned away by the
+			 * unsigned-token default (issue #352) before the
+			 * missing-signature check the keyed checker used to
+			 * report; either way it does not verify. */
 			ks.key = g_item;
 			ks.clear_alg = 0;
 			ck_assert_int_eq(jwt_checker_verify(c, signed_tok), 0);
 			ck_assert_int_ne(jwt_checker_verify(c, forged), 0);
 			ck_assert_str_eq(jwt_checker_error_msg(c),
-					 "Expected a signature, but JWT has none");
+					 "Unsigned tokens are not allowed");
 		}
 	}
 
-	/* Unchanged: a checker given no key at all, whose callback finds none
-	 * either, verifies only unsigned tokens (see jwt_checker_setcb()). */
+	/* @rfc{8725,3.2} A checker given no key at all, whose callback finds
+	 * none either, now rejects the forged unsigned token by default
+	 * (issue #352): leaving config->key NULL is no longer enough to accept
+	 * it. A signed token still needs a key. */
 	{
 		jwt_checker_auto_t *c = jwt_checker_new();
 
@@ -1471,10 +1586,18 @@ START_TEST(test_callback_cannot_strip_key)
 		ks.key = NULL;
 		ks.clear_alg = 0;
 		ck_assert_int_eq(jwt_checker_setcb(c, key_swap_cb, &ks), 0);
-		ck_assert_int_eq(jwt_checker_verify(c, forged), 0);
+		ck_assert_int_ne(jwt_checker_verify(c, forged), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(c),
+				 "Unsigned tokens are not allowed");
+		ck_assert_uint_eq(jwt_checker_sig_count(c), 0);
 		ck_assert_int_ne(jwt_checker_verify(c, signed_tok), 0);
 		ck_assert_str_eq(jwt_checker_error_msg(c),
 				 "JWT has signature, but no key was given");
+
+		/* Opting in with JWT_ALG_NONE accepts the unsigned token on
+		 * purpose, for an application that wants exactly that. */
+		checker_allow_none(c);
+		ck_assert_int_eq(jwt_checker_verify(c, forged), 0);
 	}
 
 	free_key();
@@ -1650,9 +1773,13 @@ START_TEST(test_callback_unkey_does_not_last)
 	ck_assert_str_eq(jwt_checker_error_msg(c),
 			 "A callback removed the checker's key");
 
-	/* The application itself can still make the checker unkeyed. */
+	/* The application itself can still take the key back, outside a verify.
+	 * The checker is then unkeyed, and with the unsigned-token opt-in
+	 * (issue #352) it accepts the forged unsigned token on purpose, while a
+	 * signed one has no key (and is not in the allowlist) to verify with. */
 	ck_assert_int_eq(jwt_checker_setjti(c, NULL, NULL), 0);
 	ck_assert_int_eq(jwt_checker_setkey(c, JWT_ALG_NONE, NULL), 0);
+	checker_allow_none(c);
 	ck_assert_int_eq(jwt_checker_verify(c, forged), 0);
 	ck_assert_int_ne(jwt_checker_verify(c, signed_tok), 0);
 
@@ -2293,6 +2420,296 @@ START_TEST(test_json_null_member)
 }
 END_TEST
 
+/* @rfc{7517,4} A JWK key component ("n"/"e"/"d" of RSA, "d" of EC, "x"/"d" of
+ * OKP) is a base64url-encoded string. Given a number or boolean instead, it
+ * must never be read as key material. json-c's jwt_json_str_val() used to
+ * serialize a non-string to its JSON text (the int 12345678 becomes "12345678",
+ * a valid base64url string that decodes to 6 bytes), which the OpenSSL parser
+ * then built a key from: a bogus 48-bit RSA key loaded, and a "d":<number>
+ * beside a real public key materialized a *private* key. Jansson returned NULL
+ * for a non-string all along, and GnuTLS/MbedTLS type-check their members; now
+ * json-c returns NULL too, so the two JSON backends agree.
+ *
+ * The invariant that holds on every crypto backend is is_private == 0: a
+ * non-string component is never read as a private key. When the corrupt member
+ * is a *required public* one (RSA "n", OKP "x"), no key can load at all, so the
+ * item is in error with no bits. When it is the optional private "d" beside a
+ * valid public key, OpenSSL rejects the whole key while GnuTLS and MbedTLS
+ * ignore the non-string "d" and load the public key — neither forges a private
+ * key, which is the point. */
+START_TEST(test_jwks_member_type_confusion)
+{
+	static const struct {
+		const char *json;
+		int pub_corrupt;	/* the non-string member is a required
+					 * public one, so no key can load */
+	} cases[] = {
+		/* RSA "n" as a number ("12345678" is valid base64url). */
+		{ "{\"kty\":\"RSA\",\"n\":12345678,\"e\":\"AQAB\"}", 1 },
+		/* EC private "d" as a number over a real P-256 public key. */
+		{ "{\"kty\":\"EC\",\"crv\":\"P-256\","
+		  "\"x\":\"Y--DdSpCZ5oF3j__h-SdNJIwvB5aI4AXzpRErGUjWrM\","
+		  "\"y\":\"_bSTCXlDeU-pZZbOKDUVLANspSIeuKZfTM8rtXFG_RU\","
+		  "\"d\":123}", 0 },
+		/* OKP public "x" as a boolean. */
+		{ "{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":true}", 1 },
+		/* OKP private "d" as a number over a real Ed25519 public key. */
+		{ "{\"kty\":\"OKP\",\"crv\":\"Ed25519\","
+		  "\"x\":\"HUj-14kN6N4i5qNVkfEhwKiCf-tSrvRHstQdtV8a5QM\","
+		  "\"d\":123}", 0 },
+	};
+	size_t j;
+
+	SET_OPS();
+
+	for (j = 0; j < ARRAY_SIZE(cases); j++) {
+		jwk_set_auto_t *jwk_set = jwks_create(cases[j].json);
+		const jwk_item_t *item;
+
+		ck_assert_ptr_nonnull(jwk_set);
+		/* The set parses; any failure is carried on the item. */
+		ck_assert_int_eq(jwks_error(jwk_set), 0);
+
+		item = jwks_item_get(jwk_set, 0);
+		ck_assert_ptr_nonnull(item);
+
+		/* Never a private key built from a non-string component. */
+		ck_assert_int_eq(jwks_item_is_private(item), 0);
+
+		if (cases[j].pub_corrupt) {
+			/* A required public component is non-string, so no key
+			 * loads on any backend. */
+			ck_assert_int_ne(jwks_item_error(item), 0);
+			ck_assert_int_eq(jwks_item_key_bits(item), 0);
+		}
+	}
+}
+END_TEST
+
+/* === #360: raw control characters and json-c's lenient extensions ===
+ *
+ * A raw control character (U+0000-U+001F) inside a string, and json-c's
+ * non-standard single-quoted strings and /-comments, are JSON that Jansson
+ * refuses and json-c's lenient default accepted. libjwt now scans the input
+ * the way Jansson's parser would, so both backends reject them alike, while
+ * valid UTF-8 and a raw DEL (0x7F, which RFC 8259 allows) still pass.
+ */
+
+/* In a Compact token's payload, a member value or a member name; and in the
+ * outer object of a JWS JSON token. */
+START_TEST(test_json_control_char_in_token)
+{
+	/* setpayload stores raw bytes verbatim, so the token builds; the
+	 * control character is only seen (and refused) when the payload is
+	 * parsed at verify time. The first entry is the clean control. */
+	const char * const payloads[] = {
+		"{\"sub\":\"ab\"}",
+		"{\"sub\":\"a\tb\"}",		/* TAB (0x09) in a value */
+		"{\"sub\":\"a\x01" "b\"}",	/* 0x01 in a value */
+		"{\"sub\":\"a\x1f" "b\"}",	/* 0x1F in a value */
+		"{\"s\tub\":\"ab\"}",		/* TAB in a member name */
+	};
+	size_t i;
+	int ret;
+
+	SET_OPS();
+
+	read_json("oct_key_256.json");
+
+	for (i = 0; i < ARRAY_SIZE(payloads); i++) {
+		jwt_builder_auto_t *b = jwt_builder_new();
+		jwt_checker_auto_t *c = jwt_checker_new();
+		char_auto *tok = NULL;
+
+		ck_assert_ptr_nonnull(b);
+		ck_assert_ptr_nonnull(c);
+		ret = jwt_builder_setkey(b, JWT_ALG_HS256, g_item);
+		ck_assert_int_eq(ret, 0);
+		ret = jwt_builder_setpayload(b,
+				(const unsigned char *)payloads[i],
+				strlen(payloads[i]));
+		ck_assert_int_eq(ret, 0);
+		tok = jwt_builder_generate(b);
+		ck_assert_ptr_nonnull(tok);
+
+		ret = jwt_checker_setkey(c, JWT_ALG_HS256, g_item);
+		ck_assert_int_eq(ret, 0);
+
+		ret = jwt_checker_verify(c, tok);
+		if (i == 0)
+			ck_assert_int_eq(ret, 0);
+		else
+			ck_assert_int_ne(ret, 0);
+	}
+
+	/* An otherwise-valid signed token with an extra top-level member that
+	 * holds a control character: json-c used to verify it (the member is
+	 * ignored), Jansson rejected the outer JSON. */
+	{
+		char_auto *plain = hdr_compact(&hdr_plain);
+		char_auto *flat = hdr_flat(&hdr_plain, ",\"x\":\"a\x01" "b\"");
+		char_auto *general = hdr_general(&hdr_plain, "",
+						 ",\"x\":\"a\x01" "b\"");
+
+		ck_assert_ptr_null(hdr_verify(plain, 0, NULL));
+		ck_assert_ptr_nonnull(hdr_verify(flat, 0, NULL));
+		ck_assert_ptr_nonnull(hdr_verify(general, 0, NULL));
+	}
+
+	free_key();
+}
+END_TEST
+
+/* Likewise in a JWK or JWKS, from a string, a buffer, a FILE * or a file. */
+START_TEST(test_json_control_char_in_jwks)
+{
+	/* A valid oct key, with a raw TAB in its "kid" value or a member name:
+	 * loaded with json-c, refused by Jansson. */
+	const char value[] = "{\"kty\":\"oct\",\"kid\":\"a\tb\","
+		"\"k\":\"0gmNspkRljssLSrldySnYUS-zhtCo5sqeqo_yl7n2XA\"}";
+	const char name[] = "{\"k\tty\":\"oct\","
+		"\"k\":\"0gmNspkRljssLSrldySnYUS-zhtCo5sqeqo_yl7n2XA\"}";
+	char path[] = "/tmp/libjwt_ctrl_XXXXXX";
+	jwk_set_t *set;
+	FILE *fp;
+	int fd;
+
+	SET_OPS();
+
+	set = jwks_create(value);
+	ck_assert_ptr_nonnull(set);
+	ck_assert_int_ne(jwks_error(set), 0);
+	jwks_free(set);
+
+	set = jwks_create_strn(value, strlen(value));
+	ck_assert_ptr_nonnull(set);
+	ck_assert_int_ne(jwks_error(set), 0);
+	jwks_free(set);
+
+	set = jwks_create(name);
+	ck_assert_ptr_nonnull(set);
+	ck_assert_int_ne(jwks_error(set), 0);
+	jwks_free(set);
+
+	fd = mkstemp(path);
+	ck_assert_int_ge(fd, 0);
+	fp = fdopen(fd, "w+");
+	ck_assert_ptr_nonnull(fp);
+	ck_assert_int_ge(fputs(value, fp), 0);
+	ck_assert_int_eq(fflush(fp), 0);
+	rewind(fp);
+
+	set = jwks_create_fromfp(fp);
+	fclose(fp);
+	ck_assert_ptr_nonnull(set);
+	ck_assert_int_ne(jwks_error(set), 0);
+	jwks_free(set);
+
+	set = jwks_create_fromfile(path);
+	unlink(path);
+	ck_assert_ptr_nonnull(set);
+	ck_assert_int_ne(jwks_error(set), 0);
+	jwks_free(set);
+}
+END_TEST
+
+/* A raw NUL after the value in a JWKS file: json-c read the file as a C
+ * string, so the NUL truncated the input and the key before it loaded with
+ * whatever followed ignored. The file is now parsed by its length, so the
+ * trailing bytes are refused as they are from a buffer. */
+START_TEST(test_json_file_nul_trailing)
+{
+	static const char doc[] =
+		"{\"kty\":\"oct\",\"kid\":\"k1\","
+		"\"k\":\"0gmNspkRljssLSrldySnYUS-zhtCo5sqeqo_yl7n2XA\"}"
+		"\0{\"kty\":\"oct\"}";
+	size_t doclen = sizeof(doc) - 1;	/* the value, a NUL, then junk */
+	char path[] = "/tmp/libjwt_fnul_XXXXXX";
+	jwk_set_t *set;
+	FILE *fp;
+	int fd;
+
+	SET_OPS();
+
+	fd = mkstemp(path);
+	ck_assert_int_ge(fd, 0);
+	fp = fdopen(fd, "w+");
+	ck_assert_ptr_nonnull(fp);
+	ck_assert_uint_eq(fwrite(doc, 1, doclen, fp), doclen);
+	ck_assert_int_eq(fflush(fp), 0);
+	rewind(fp);
+
+	set = jwks_create_fromfp(fp);
+	fclose(fp);
+	ck_assert_ptr_nonnull(set);
+	ck_assert_int_ne(jwks_error(set), 0);
+	ck_assert_ptr_null(jwks_item_get(set, 0));
+	jwks_free(set);
+
+	set = jwks_create_fromfile(path);
+	unlink(path);
+	ck_assert_ptr_nonnull(set);
+	ck_assert_int_ne(jwks_error(set), 0);
+	ck_assert_ptr_null(jwks_item_get(set, 0));
+	jwks_free(set);
+}
+END_TEST
+
+/* Valid non-ASCII UTF-8, a raw DEL (0x7F), and a backslash escape are not
+ * control characters and must still load on both backends. */
+START_TEST(test_json_must_still_pass)
+{
+	static const char * const values[] = {
+		"{\"kty\":\"oct\",\"kid\":\"\xc3\xa9\","		/* U+00E9 */
+			"\"k\":\"0gmNspkRljssLSrldySnYUS-zhtCo5sqeqo_yl7n2XA\"}",
+		"{\"kty\":\"oct\",\"kid\":\"\xf0\x9f\x98\x80\","	/* emoji */
+			"\"k\":\"0gmNspkRljssLSrldySnYUS-zhtCo5sqeqo_yl7n2XA\"}",
+		"{\"kty\":\"oct\",\"kid\":\"a\x7f" "b\","	/* DEL */
+			"\"k\":\"0gmNspkRljssLSrldySnYUS-zhtCo5sqeqo_yl7n2XA\"}",
+		"{\"kty\":\"oct\",\"kid\":\"a\\nb\","		/* escape */
+			"\"k\":\"0gmNspkRljssLSrldySnYUS-zhtCo5sqeqo_yl7n2XA\"}",
+	};
+	size_t i;
+
+	SET_OPS();
+
+	for (i = 0; i < ARRAY_SIZE(values); i++) {
+		jwk_set_auto_t *set = jwks_create(values[i]);
+
+		ck_assert_ptr_nonnull(set);
+		ck_assert_int_eq(jwks_error_any(set), 0);
+		ck_assert_ptr_nonnull(jwks_item_get(set, 0));
+	}
+}
+END_TEST
+
+/* json-c's lenient single-quoted strings and /-comments are refused, as
+ * Jansson refuses them. Each wraps a valid oct key json-c used to load. */
+START_TEST(test_json_lenient_extensions_rejected)
+{
+#define OCT_FULL "\"kty\":\"oct\",\"k\":" \
+	"\"0gmNspkRljssLSrldySnYUS-zhtCo5sqeqo_yl7n2XA\""
+	static const char * const docs[] = {
+		"{'kty':'oct','k':"
+			"'0gmNspkRljssLSrldySnYUS-zhtCo5sqeqo_yl7n2XA'}",
+		"/* c */{" OCT_FULL "}",
+		"//c\n{" OCT_FULL "}",
+		"{" OCT_FULL "}/x",	/* a slash that is not a comment */
+	};
+#undef OCT_FULL
+	size_t i;
+
+	SET_OPS();
+
+	for (i = 0; i < ARRAY_SIZE(docs); i++) {
+		jwk_set_auto_t *set = jwks_create(docs[i]);
+
+		ck_assert_ptr_nonnull(set);
+		ck_assert_int_ne(jwks_error(set), 0);
+	}
+}
+END_TEST
+
 /*
  * === Suite Setup ===
  */
@@ -2325,6 +2742,10 @@ static Suite *libjwt_suite(const char *title)
 	tcase_add_loop_test(tc_jwks_json, test_jwks_eddsa_missing_x, 0, i);
 	tcase_add_loop_test(tc_jwks_json, test_jwks_okp_x25519_bad_x_len, 0, i);
 	tcase_add_loop_test(tc_jwks_json, test_jwks_okp_x25519_bad_d_len, 0, i);
+	tcase_add_loop_test(tc_jwks_json, test_jwks_ec_private_d_zero, 0, i);
+	tcase_add_loop_test(tc_jwks_json, test_jwks_ec_private_d_order, 0, i);
+	tcase_add_loop_test(tc_jwks_json, test_jwks_ec_private_d_mismatch, 0, i);
+	tcase_add_loop_test(tc_jwks_json, test_jwks_ec_private_d_mismatch_p521, 0, i);
 	tcase_add_loop_test(tc_jwks_json, test_jwks_rsa_partial_private_key, 0, i);
 	tcase_add_loop_test(tc_jwks_json, test_jwks_rsa_wrong_value_types, 0, i);
 	tcase_add_loop_test(tc_jwks_json, test_jwks_deeply_nested, 0, i);
@@ -2426,6 +2847,13 @@ static Suite *libjwt_suite(const char *title)
 	tcase_add_loop_test(tc_json_parity, test_jwks_file_trailing_data, 0, i);
 	tcase_add_loop_test(tc_json_parity, test_json_null_array_element, 0, i);
 	tcase_add_loop_test(tc_json_parity, test_json_null_member, 0, i);
+	tcase_add_loop_test(tc_json_parity, test_jwks_member_type_confusion, 0, i);
+	tcase_add_loop_test(tc_json_parity, test_json_control_char_in_token, 0, i);
+	tcase_add_loop_test(tc_json_parity, test_json_control_char_in_jwks, 0, i);
+	tcase_add_loop_test(tc_json_parity, test_json_file_nul_trailing, 0, i);
+	tcase_add_loop_test(tc_json_parity, test_json_must_still_pass, 0, i);
+	tcase_add_loop_test(tc_json_parity, test_json_lenient_extensions_rejected,
+			    0, i);
 
 	tcase_set_timeout(tc_json_parity, 30);
 	suite_add_tcase(s, tc_json_parity);

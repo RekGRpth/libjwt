@@ -583,12 +583,22 @@ static int jwt_typ_matches(const char *want, const char *got)
 }
 
 /* @rfc{8725} Does the parsed header (@jwt->headers) and algorithm (@jwt->alg)
- * satisfy the checker's "typ" expectation and algorithm allowlist? Returns 1 if
- * acceptable (or nothing is configured), 0 if it should be rejected. */
-static int jwt_typ_alg_ok(jwt_t *jwt)
+ * satisfy the checker's "typ" expectation and algorithm policy? Returns 1 if
+ * acceptable, 0 if it should be rejected; on a 0 return @reason (when not NULL)
+ * is set to a static message naming the cause.
+ *
+ * @rfc{8725,3.2} With no explicit allowlist (jwt_checker_setalgs()), any signed
+ * algorithm is accepted but an unsigned ("alg":"none") token is not: consuming
+ * one requires opting in by listing ::JWT_ALG_NONE. A non-empty allowlist is
+ * authoritative either way, so JWT_ALG_NONE in it opts in and a signed-only
+ * allowlist keeps unsigned tokens out, as before. */
+static int jwt_typ_alg_ok(jwt_t *jwt, const char **reason)
 {
 	jwt_checker_t *checker = jwt->checker;
 	size_t i;
+
+	if (reason != NULL)
+		*reason = "Token rejected by \"typ\" or algorithm policy";
 
 	if (checker == NULL)
 		return 1; // LCOV_EXCL_LINE
@@ -609,16 +619,27 @@ static int jwt_typ_alg_ok(jwt_t *jwt)
 		return 0;
 	}
 
+	/* @rfc{8725,3.2} No allowlist: accept any signed algorithm, but an
+	 * unsigned token only when JWT_ALG_NONE was listed (handled above). */
+	if (jwt->alg == JWT_ALG_NONE) {
+		if (reason != NULL)
+			*reason = "Unsigned tokens are not allowed";
+		return 0;
+	}
+
 	return 1;
 }
 
 static int __verify_config_post(jwt_t *jwt, const jwt_config_t *config,
 				unsigned int sig_len)
 {
-	/* @rfc{8725} Enforce the typ expectation / algorithm allowlist first. */
-	if (!jwt_typ_alg_ok(jwt)) {
-		jwt_write_error(jwt,
-			"Token rejected by \"typ\" or algorithm policy");
+	const char *reason;
+
+	/* @rfc{8725} Enforce the typ expectation / algorithm policy first. This
+	 * also rejects an unsigned ("alg":"none") token by default
+	 * (@rfc{8725,3.2}); @reason names which it was. */
+	if (!jwt_typ_alg_ok(jwt, &reason)) {
+		jwt_write_error(jwt, "%s", reason);
 		return 1;
 	}
 
@@ -1083,8 +1104,11 @@ static int verify_entry(jwt_checker_t *checker, jwt_t *jwt,
 	}
 
 	/* @rfc{8725} A signature whose "typ"/alg does not meet the checker's
-	 * expectation is simply not accepted (skipped), so the policy decides. */
-	if (!jwt_typ_alg_ok(jwt)) {
+	 * expectation is simply not accepted (skipped), so the policy decides.
+	 * (The unsigned-token default never fires here: build_sig_entry()
+	 * already refuses "alg":"none" in a JSON serialization, so this is the
+	 * typ/allowlist policy only, and the reason is not reported.) */
+	if (!jwt_typ_alg_ok(jwt, NULL)) {
 		jwt->headers = NULL;
 		return 0;
 	}
@@ -1110,6 +1134,23 @@ static int verify_entry(jwt_checker_t *checker, jwt_t *jwt,
 		return 0;
 	}
 
+	/* @rfc{8725,3.1} Resolve a JWT_ALG_NONE pin to the explicit key's
+	 * own "alg", as the Compact path's __setkey_check() does: a
+	 * callback that sets config->alg = JWT_ALG_NONE means "the key's
+	 * alg", so a key that carries one pins it and a key without one
+	 * verifies nothing, rather than dropping the pin and letting any
+	 * alg of the right key type through (the pinning bypass, #353).
+	 * The seed is never JWT_ALG_NONE (a JSON signature has no
+	 * "alg":"none"), so only the callback reaches here with it NONE.
+	 * The keyring scan applies the same rule per candidate below. */
+	if (config.alg == JWT_ALG_NONE && config.key != NULL) {
+		config.alg = jwks_item_alg(config.key);
+		if (config.alg == JWT_ALG_NONE) {
+			jwt->headers = NULL;
+			return 0;
+		}
+	}
+
 	/* @rfc{8725,3.1} Pin the EXACT algorithm, as the Compact path does: a
 	 * signature whose "alg" is not the one pinned (by jwt_checker_setkey()
 	 * or in config->alg by the callback) does not verify, even with a key
@@ -1129,6 +1170,13 @@ static int verify_entry(jwt_checker_t *checker, jwt_t *jwt,
 			const jwk_item_t *k = jwks_item_get(ring, i);
 			jwt_alg_t kalg = jwks_item_alg(k);
 
+			/* config.alg is JWT_ALG_NONE here only if the
+			 * callback reset the pin to the key's own alg (the
+			 * seed is this signature's concrete alg): a ring key
+			 * with no "alg" then verifies nothing, matching the
+			 * explicit-key rule above (#353). */
+			if (config.alg == JWT_ALG_NONE && kalg == JWT_ALG_NONE)
+				continue;
 			if (kalg != JWT_ALG_NONE && kalg != s->alg)
 				continue;
 			if (!ring_key_verifies(k))
@@ -1365,6 +1413,17 @@ int jwt_checker_verify_detached(jwt_checker_t *checker, const char *token,
 	if (token == NULL || !strlen(token)) {
 		jwt_write_error(checker, "Must pass a token");
 		return 1;
+	}
+	/* Reject an oversized token before it is decoded or reconstructed, as
+	 * jwt_checker_verify() does: this path base64-decodes the protected
+	 * header and (for a JSON token) parses the raw token before it hands
+	 * the rebuilt token to jwt_checker_verify(), all with lengths held in
+	 * int. No real token is anywhere near INT_MAX bytes. */
+	if (strlen(token) >= INT_MAX) {
+		// LCOV_EXCL_START
+		jwt_write_error(checker, "Token too large");
+		return 1;
+		// LCOV_EXCL_STOP
 	}
 	if (payload == NULL && len > 0) {
 		jwt_write_error(checker, "Must pass a payload");
