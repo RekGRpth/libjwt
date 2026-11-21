@@ -72,6 +72,9 @@ void FUNC(free)(jwt_common_t *__cmd)
 	if (__cmd->c.embedded_owned != NULL)
 		jwks_free(__cmd->c.embedded_owned);
 
+	/* The checker's last accepted token (jwt_checker_verified_jwt()). */
+	jwt_free(__cmd->c.verified);
+
 	memset(__cmd, 0, sizeof(*__cmd));
 
 	jwt_freemem(__cmd);
@@ -92,6 +95,10 @@ jwt_common_t *FUNC(new)(void)
 
 	/* @rfc{7797} base64url payloads by default (b64=true). */
 	__cmd->c.b64 = 1;
+
+#ifdef JWT_CHECKER
+	__cmd->c.max_size = JWT_CHECKER_MAX_SIZE_DEFAULT;
+#endif
 
 	__cmd->c.payload = jwt_json_create();
 	__cmd->c.headers = jwt_json_create();
@@ -225,17 +232,37 @@ int FUNC(setkey)(jwt_common_t *__cmd, const jwt_alg_t alg,
 	/* Any key the builder accepts, or no key at all, settles a refusal. */
 	__cmd->c.key_required = 0;
 
-	/* @rfc{7515,7.2} Mirror the primary signer into the first signature, so
-	 * a JSON-format build (and any later add_signature) sees it in the list.
-	 * Repeated setkey() updates that same first node rather than appending. */
-	{
-		struct jwt_signature *s = jwt_signature_first_or_add(&__cmd->c);
+	/* @rfc{7515,7.2} setkey() owns one signer node of its own, first in the
+	 * list: the first call makes it, later calls update it, and
+	 * setkey(JWT_ALG_NONE, NULL) removes it. It never touches a node that
+	 * jwt_builder_add_signature() made, whose handle keeps its key and its
+	 * headers, whatever the call order. */
+	if (alg == JWT_ALG_NONE && key == NULL) {
+		struct jwt_signature *s = __cmd->c.setkey_sig;
+
+		if (s != NULL) {
+			list_del(&s->node);
+			jwt_signature_free(s);
+			__cmd->c.setkey_sig = NULL;
+			__cmd->c.n_signatures--;
+		}
+	} else {
+		struct jwt_signature *s = __cmd->c.setkey_sig;
 
 		if (s == NULL) {
-			// LCOV_EXCL_START
-			jwt_write_error(__cmd, "Error allocating memory");
-			return 1;
-			// LCOV_EXCL_STOP
+			s = jwt_signature_prepend(&__cmd->c);
+			if (s == NULL) {
+				// LCOV_EXCL_START
+				jwt_write_error(__cmd, "Error allocating memory");
+				return 1;
+				// LCOV_EXCL_STOP
+			}
+			__cmd->c.setkey_sig = s;
+
+			/* @rfc{7515,7.2.1} A second signer requires the
+			 * General JSON form, as in add_signature(). */
+			if (__cmd->c.n_signatures > 1)
+				__cmd->c.format = JWT_FORMAT_JSON_GENERAL;
 		}
 		s->alg = alg;
 		s->key = key;
@@ -633,81 +660,6 @@ int FUNC(time_leeway)(jwt_common_t *__cmd, jwt_claims_t claim, time_t secs)
 }
 
 #ifdef JWT_CHECKER
-/* @rfc{7515,7.2.2} A keyring checker verifies a Compact token as the
- * equivalent one-signature Flattened JWS JSON Serialization, so it gets exactly
- * what a JSON token gets: a "kid" selects that ring key (no fallback), a
- * kid-less token is tried against every compatible key, each under the
- * alg/key-type binding and the key's "alg" pin; the typ/alg policy,
- * per-signature callback, claims, required claims and jti all apply; and
- * "none" is never accepted. The Compact path below only knows the single key,
- * which jwt_checker_setkeyring() clears, so it would treat the checker as
- * unkeyed and accept a forged unsigned token (GHSA-mhc9-xvg5-qg29).
- *
- * "protected" is the text before the FIRST '.', "signature" the text after the
- * LAST '.', and "payload" everything between, so an @rfc{7797} unencoded
- * payload containing '.' stays intact. The JSON is built with the JSON API,
- * never by formatting a string: a raw payload may hold quotes or backslashes
- * and must not be able to add members. Returns a malloc'd string, or NULL with
- * the checker error set. */
-static char *compact_to_flattened(jwt_checker_t *checker, const char *token)
-{
-	static const char * const names[] = {
-		"protected", "payload", "signature",
-	};
-	jwt_json_auto_t *root = NULL;
-	char_auto *buf = NULL;
-	const char *parts[ARRAY_SIZE(names)];
-	char *first, *last, *out;
-	size_t i, len = strlen(token) + 1;
-
-	buf = jwt_malloc(len);
-	if (buf == NULL) {
-		jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
-		return NULL; // LCOV_EXCL_LINE
-	}
-	memcpy(buf, token, len);
-
-	first = strchr(buf, '.');
-	last = strrchr(buf, '.');
-	if (first == NULL || first == last) {
-		jwt_write_error(checker, "Invalid JWS Compact Serialization");
-		return NULL;
-	}
-	*first = '\0';
-	*last = '\0';
-	parts[0] = buf;
-	parts[1] = first + 1;
-	parts[2] = last + 1;
-
-	root = jwt_json_create();
-	if (root == NULL) {
-		jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
-		return NULL; // LCOV_EXCL_LINE
-	}
-
-	for (i = 0; i < ARRAY_SIZE(names); i++) {
-		jwt_json_t *v = jwt_json_create_str(parts[i]);
-
-		/* Jansson refuses a string that is not valid UTF-8 (json-c
-		 * takes any bytes), e.g. a binary unencoded payload. */
-		if (v == NULL) {
-			jwt_write_error(checker, "Token is not valid UTF-8");
-			return NULL;
-		}
-		/* obj_set consumes @v even when it fails. */
-		if (jwt_json_obj_set(root, names[i], v)) {
-			jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
-			return NULL; // LCOV_EXCL_LINE
-		}
-	}
-
-	out = jwt_json_serialize(root, JWT_JSON_COMPACT);
-	if (out == NULL)
-		jwt_write_error(checker, "Error allocating memory"); // LCOV_EXCL_LINE
-
-	return out;
-}
-
 static int __verify(jwt_common_t *__cmd, const char *token)
 {
 	JWT_CONFIG_DECLARE(config);
@@ -729,6 +681,10 @@ static int __verify(jwt_common_t *__cmd, const char *token)
 		__cmd->c.n_signatures = 0;
 		__cmd->c.last_sig_count = 0;
 
+		/* The last accepted token goes before anything else runs, so
+		 * neither a failure here nor a callback sees it. */
+		jwt_freep(&__cmd->c.verified);
+
 		/* @rfc{7515,4.1.3} Drop a confirmed embedded key from a prior
 		 * verify before it can be borrowed by this one. */
 		if (__cmd->c.embedded_owned != NULL) {
@@ -737,22 +693,23 @@ static int __verify(jwt_common_t *__cmd, const char *token)
 		}
 	}
 
-	if (token == NULL || !strlen(token)) {
+	if (token == NULL || *token == '\0') {
 		jwt_write_error(__cmd, "Must pass a token");
 		return 1;
 	}
 
-	/* The token is copied whole and sliced into header, payload and
-	 * signature, each measured with a length held in int (jwt_parse(),
-	 * jwt_base64uri_decode(), and verify_entry() on the JSON path). A
-	 * length of INT_MAX or more does not fit that int, so a token that
-	 * long cannot be handled correctly. No real token is anywhere near
-	 * that large, so reject it here, before any of that runs. */
-	if (strlen(token) >= INT_MAX) {
-		// LCOV_EXCL_START
+	/* Reject a token longer than the checker's limit (1 MiB unless
+	 * jwt_checker_setmaxsize() changed it) here, before it is copied,
+	 * decoded or parsed. strnlen() stops one byte past the limit, so an
+	 * oversized token is not even measured in full. The token is sliced
+	 * into header, payload and signature, each measured with a length
+	 * held in int (jwt_parse(), jwt_base64uri_decode(), and the
+	 * signing input on the keyring path), so a length of INT_MAX or more
+	 * is refused whatever the limit says; the setter keeps the limit
+	 * below that anyway. */
+	if (jwt_token_too_large(token, __cmd->c.max_size)) {
 		jwt_write_error(__cmd, "Token too large");
 		return 1;
-		// LCOV_EXCL_STOP
 	}
 
 	/* @rfc{7515,7.2} A token whose first non-whitespace byte is '{' is a
@@ -767,17 +724,11 @@ static int __verify(jwt_common_t *__cmd, const char *token)
 	}
 
 	/* A keyring checker verifies a Compact token as its one-signature JSON
-	 * equivalent (see compact_to_flattened()), never on the single-key path
-	 * below. Embedded-JWK verify keeps its own Compact flow and, as before,
-	 * takes precedence over a keyring. */
-	if (__cmd->c.keyring != NULL && !__cmd->c.embedded_jwk) {
-		char_auto *flat = compact_to_flattened(__cmd, token);
-
-		if (flat == NULL)
-			return 1;
-
-		return jwt_verify_json(__cmd, flat);
-	}
+	 * equivalent (see jwt_verify_compact_ring()), never on the single-key
+	 * path below. Embedded-JWK verify keeps its own Compact flow and, as
+	 * before, takes precedence over a keyring. */
+	if (__cmd->c.keyring != NULL && !__cmd->c.embedded_jwk)
+		return jwt_verify_compact_ring(__cmd, token);
 
 	jwt = jwt_new();
 	if (jwt == NULL) {
@@ -885,6 +836,12 @@ static int __verify(jwt_common_t *__cmd, const char *token)
 			s->alg = jwt->alg;
 		}
 		__cmd->c.last_sig_count = 1;
+
+		/* Accepted: the checker keeps the token, with its claims,
+		 * protected header and verified alg, for
+		 * jwt_checker_verified_jwt() until its next verify. */
+		__cmd->c.verified = jwt;
+		jwt = NULL;
 	}
 
 	return __cmd->error;
@@ -934,6 +891,22 @@ int jwt_checker_setkeyring(jwt_checker_t *checker, const jwk_set_t *keyring,
 	checker->c.keyring = keyring;
 	checker->c.policy = policy;
 	checker->c.key_required = 1;
+
+	return 0;
+}
+
+int jwt_checker_setmaxsize(jwt_checker_t *checker, size_t size)
+{
+	if (checker == NULL)
+		return 1;
+
+	/* Out of range: refuse it and keep the limit the checker had. */
+	if (size == 0 || size > JWT_CHECKER_MAX_SIZE_CEILING) {
+		jwt_write_error(checker, "Invalid maximum token size");
+		return 1;
+	}
+
+	checker->c.max_size = size;
 
 	return 0;
 }
@@ -1167,6 +1140,38 @@ const jwk_item_t *jwt_checker_sig_key(const jwt_checker_t *checker,
 
 	return (s != NULL && s->verified) ? s->key : NULL;
 }
+
+/* Both getters read only c.verified, which every verify releases before it
+ * does anything else and sets only once it has accepted the token: so after a
+ * failed verify, and inside a callback, there is nothing to read. */
+jwt_t *jwt_checker_verified_jwt(jwt_checker_t *checker)
+{
+	return checker ? checker->c.verified : NULL;
+}
+
+jwt_value_error_t jwt_checker_sig_header_get(jwt_checker_t *checker,
+					     unsigned int index,
+					     jwt_value_t *value)
+{
+	const struct jwt_signature *s;
+
+	if (value == NULL)
+		return JWT_VALUE_ERR_INVALID;
+
+	if (checker == NULL || checker->c.verified == NULL)
+		return value->error = JWT_VALUE_ERR_INVALID;
+
+	s = checker_sig_at(checker, index);
+	if (s == NULL || !s->verified)
+		return value->error = JWT_VALUE_ERR_INVALID;
+
+	/* A General signature keeps its own protected header. A Compact or
+	 * Flattened token's lives in the accepted jwt_t (the single-key
+	 * Compact path never had one on the signature; the others hand it
+	 * over), and never its unprotected "header". */
+	return __getter(s->protected ? s->protected :
+			checker->c.verified->headers, value);
+}
 #endif
 
 #ifdef JWT_BUILDER
@@ -1361,15 +1366,14 @@ char *FUNC(generate)(jwt_common_t *__cmd)
 		return NULL;
 	}
 
-	/* A key set earlier was refused for being in error (key_required) and a
-	 * callback supplied a replacement but no alg: sign with that key's own
-	 * "alg", so the token is signed as it was before the key was refused,
-	 * not emitted unsigned ("alg":"none"). Without a replacement key the
-	 * Compact path below still withholds the unsigned token (__key_refused).
-	 * A callback that sets the alg itself, or a key that carries none, is
-	 * unaffected. */
-	if (__cmd->c.key_required && config.alg == JWT_ALG_NONE &&
-	    config.key != NULL)
+	/* A callback that supplied a key but no alg (for one, a replacement
+	 * for a key refused for being in error, key_required): sign with that
+	 * key's own "alg", as jwt_builder_setkey(JWT_ALG_NONE, key) does and as
+	 * the JSON forms do, not emit the Compact token unsigned
+	 * ("alg":"none"). Without a key the Compact path below still withholds
+	 * the unsigned token after a refusal (__key_refused). A callback that
+	 * sets the alg itself, or a key that carries none, is unaffected. */
+	if (config.alg == JWT_ALG_NONE && config.key != NULL)
 		config.alg = config.key->alg;
 
 	/* Callback may have changed this */
@@ -1447,14 +1451,21 @@ char *FUNC(generate)(jwt_common_t *__cmd)
 		return NULL;
 	}
 
-	/* @rfc{7515,7.2} JSON Serialization (one or more signatures). */
+	/* @rfc{7515,7.2} JSON Serialization (one or more signatures). The
+	 * callback's config alg/key (now in jwt) sign the setkey() signer's
+	 * signature, as in the Compact form. With no setkey() node, a key the
+	 * callback supplied acts as that signer: one more signature, first. */
 	if (__cmd->c.format != JWT_FORMAT_COMPACT) {
-		if (__cmd->c.n_signatures == 0) {
+		int n_sigs = __cmd->c.n_signatures;
+
+		if (__cmd->c.setkey_sig == NULL && jwt->key != NULL)
+			n_sigs++;
+
+		if (n_sigs == 0) {
 			jwt_write_error(__cmd, "No key set for JSON serialization");
 			return NULL;
 		}
-		if (__cmd->c.format == JWT_FORMAT_JSON_FLAT &&
-		    __cmd->c.n_signatures > 1) {
+		if (__cmd->c.format == JWT_FORMAT_JSON_FLAT && n_sigs > 1) {
 			jwt_write_error(__cmd,
 				"Flattened serialization allows only one signature");
 			return NULL;
@@ -1472,19 +1483,16 @@ char *FUNC(generate)(jwt_common_t *__cmd)
 		return NULL;
 	}
 
-	/* That signature is the jwt_builder_setkey() signer, which setkey()
-	 * mirrors into the first node. A lone node that does not match it was
-	 * added with jwt_builder_add_signature(): the token would be emitted
-	 * without that signer (unsigned, when setkey() was never called), so
-	 * refuse it instead of dropping it. */
-	if (__cmd->c.n_signatures == 1) {
-		struct jwt_signature *s = jwt_signature_first(&__cmd->c);
-
-		if (s->alg != __cmd->c.alg || s->key != __cmd->c.key) {
-			jwt_write_error(__cmd, "Compact serialization cannot "
-				"carry a jwt_builder_add_signature() signer");
-			return NULL;
-		}
+	/* That signature is the jwt_builder_setkey() signer (its own node, or
+	 * none at all). A lone node that is not it was added with
+	 * jwt_builder_add_signature(): the token would be emitted without that
+	 * signer (unsigned, when setkey() was never called or was undone with
+	 * JWT_ALG_NONE), so refuse it instead of dropping it. */
+	if (__cmd->c.n_signatures == 1 &&
+	    jwt_signature_first(&__cmd->c) != __cmd->c.setkey_sig) {
+		jwt_write_error(__cmd, "Compact serialization cannot "
+			"carry a jwt_builder_add_signature() signer");
+		return NULL;
 	}
 
 	/* The token is about to go out unsigned. Not if that is only because

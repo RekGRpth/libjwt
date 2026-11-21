@@ -18,6 +18,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <limits.h>
+#include <string.h>
 #ifdef HAVE_OPENSSL
 /* Only the OpenSSL backend needs this, and those files include it directly.
  * Kept here under HAVE_OPENSSL so OpenSSL builds are unchanged; non-OpenSSL
@@ -40,6 +41,21 @@
 	jwt_config_t __name = { NULL, JWT_ALG_NONE, NULL}
 
 #define JWT_ERR_LEN 256
+
+/* The longest token a checker verifies by default (1 MiB), and the most that
+ * jwt_checker_setmaxsize() allows: a token's length is held in an int on the
+ * parse paths, so it must stay below INT_MAX. */
+#define JWT_CHECKER_MAX_SIZE_DEFAULT	((size_t)1024 * 1024)
+#define JWT_CHECKER_MAX_SIZE_CEILING	((size_t)INT_MAX - 1)
+
+/* Whether @token is longer than @max bytes, or too long for an int length
+ * (the INT_MAX backstop). Reads at most @max + 1 bytes of @token. */
+static inline int jwt_token_too_large(const char *token, size_t max)
+{
+	size_t len = strnlen(token, max + 1);
+
+	return len > max || len >= INT_MAX;
+}
 
 JWT_NO_EXPORT
 extern struct jwt_crypto_ops *jwt_ops;
@@ -101,10 +117,14 @@ struct jwt_common {
 	 * The single-signature Compact path uses .alg/.key above and an empty
 	 * list, keeping its behavior byte-identical. The signature list is
 	 * materialized by jwt_builder_setkey()/add_signature() (builder) or the
-	 * JSON parse (checker); it is iterated only for the JSON serializations. */
+	 * JSON parse (checker); it is iterated only for the JSON serializations.
+	 * builder: @setkey_sig is the one node jwt_builder_setkey() owns (first
+	 * in the list, NULL when it set none); add_signature() nodes are never
+	 * it. FUNC(generate) signs it with the callback's config alg/key. */
 	jwt_serialization_t format;	/* builder: emit form; default COMPACT (0) */
 	ll_t signatures;		/* list of struct jwt_signature		*/
 	int n_signatures;
+	struct jwt_signature *setkey_sig;
 
 	/* checker: a borrowed multi-key set (JWKS) and the multi-signature
 	 * verification policy. NULL keyring => the single .key above is used. */
@@ -164,6 +184,19 @@ struct jwt_common {
 	 * it must outlive the verify (jwt_checker_sig_key() borrows it), so it is
 	 * reset at the start of each verify and freed at checker free. */
 	jwk_set_t *embedded_owned;
+
+	/* checker: the token the last verify accepted (claims; for a Compact or
+	 * Flattened token also its protected header and verified alg), handed
+	 * out by jwt_checker_verified_jwt(). Owned here: released at the start
+	 * of every verify, so it is NULL while one runs and after any failure,
+	 * and at checker free. Never set on a builder. */
+	jwt_t *verified;
+
+	/* checker: the longest token jwt_checker_verify() and
+	 * jwt_checker_verify_detached() accept, in bytes (see
+	 * jwt_checker_setmaxsize()). Always within 1 and
+	 * JWT_CHECKER_MAX_SIZE_CEILING. Unused by the builder. */
+	size_t max_size;
 };
 
 struct jwt_builder {
@@ -194,6 +227,7 @@ struct jwt_signature {
 				/* input reuses these bytes, never re-encoded	*/
 	char *sig_b64;		/* base64url(signature)				*/
 	int verified;		/* checker: 1 if this signature verified	*/
+	char reason[JWT_ERR_LEN];/* checker: why it did NOT verify, else ""	*/
 };
 
 /******************************/
@@ -642,6 +676,10 @@ JWT_NO_EXPORT
 int jwt_base64uri_encode(char **_dst, const char *plain, int plain_len);
 JWT_NO_EXPORT
 void *jwt_base64uri_decode(const char *src, int *ret_len);
+/* As jwt_base64uri_decode(), for the @len bytes at @src, which need not be
+ * NUL-terminated (e.g. one part of a Compact token, decoded in place). */
+JWT_NO_EXPORT
+void *jwt_base64uri_decode_n(const char *src, int len, int *ret_len);
 
 /* Standard (non-URL) base64, used for the @rfc{7517,4.7} "x5c" certificate
  * chain. @out must hold at least 4*((inlen+2)/3) (encode) or 3*(inlen/4)
@@ -656,6 +694,20 @@ unsigned int base64_decode(const char *in, unsigned int inlen,
 JWT_NO_EXPORT
 jwt_t *jwt_verify_sig(jwt_t *jwt, const char *head, unsigned int head_len,
                    const char *sig);
+
+/* A signature decoded from base64url for jwt_verify_sig_raw(), so that the
+ * keys tried against one signature (a keyring scan) decode it only once.
+ * Start it as { NULL, 0 } and jwt_freemem() @buf when done. */
+struct jwt_sig_raw {
+	char *buf;	/* the decoded signature, once decoded		*/
+	int len;	/* its length: 0 until decoded, -1 if that failed	*/
+};
+
+/* jwt_verify_sig(), decoding a non-HMAC signature into @raw on first use and
+ * reusing it from there on. */
+JWT_NO_EXPORT
+jwt_t *jwt_verify_sig_raw(jwt_t *jwt, const char *head, unsigned int head_len,
+			  const char *sig_b64, struct jwt_sig_raw *raw);
 JWT_NO_EXPORT
 int jwt_sign(jwt_t *jwt, char **out, unsigned int *len, const char *str,
 	     unsigned int str_len);
@@ -692,12 +744,15 @@ struct jwt_signature *jwt_signature_first(struct jwt_common *cmd);
 JWT_NO_EXPORT
 struct jwt_signature *jwt_signature_append(struct jwt_common *cmd);
 JWT_NO_EXPORT
-struct jwt_signature *jwt_signature_first_or_add(struct jwt_common *cmd);
+struct jwt_signature *jwt_signature_prepend(struct jwt_common *cmd);
 JWT_NO_EXPORT
 void jwt_signature_free(struct jwt_signature *s);
 
 /* Builder: serialize @cmd's signatures + finalized claims (@jwt->claims) into a
- * JWS JSON Serialization (Flattened or General). Returns a malloc'd string. */
+ * JWS JSON Serialization (Flattened or General). Returns a malloc'd string.
+ * @jwt->alg/@jwt->key are the jwt_builder_setkey() signer's, as the callback
+ * left them: they sign @cmd->setkey_sig, or, with no such node, a first
+ * signature of their own when @jwt->key is set. */
 JWT_NO_EXPORT
 char *jwt_encode_json(jwt_t *jwt, struct jwt_common *cmd);
 
@@ -716,6 +771,12 @@ int jwt_apply_b64_header(jwt_t *jwt);
  * key/keyring and policy. Returns 0 if the policy is satisfied. */
 JWT_NO_EXPORT
 int jwt_verify_json(jwt_checker_t *checker, const char *token);
+
+/* Checker: verify Compact @token against the checker's keyring, as the
+ * equivalent one-signature Flattened JSON token but without building or
+ * parsing that JSON. Returns 0 if the policy is satisfied. */
+JWT_NO_EXPORT
+int jwt_verify_compact_ring(jwt_checker_t *checker, const char *token);
 
 /* @rfc{7515,4.1.3} Build + confirm a verification key from the protected
  * header's "jwk" (embedded-JWK verify). Returns an owned jwk_set_t (caller
@@ -931,6 +992,16 @@ JWT_NO_EXPORT
 int jwe_ecdh_derive(jwe_key_alg_t alg, jwe_enc_t enc, const jwk_item_t *key,
 		    int for_encrypt, jwt_json_t *hdr,
 		    unsigned char **dk, size_t *dk_len);
+
+/* @rfc{7518,4.6.2} NIST SP 800-56A Concat KDF (SHA-256, any @keydatalen) over
+ * the ECDH shared secret @z, using @ops's SHA-256. Shared by every backend's
+ * ecdh_derive. Fills @out with @keydatalen octets; returns 0 on success. */
+JWT_NO_EXPORT
+int jwe_concat_kdf(const struct jwt_crypto_ops *ops,
+		   const unsigned char *z, size_t z_len, const char *algid,
+		   const unsigned char *apu, size_t apu_len,
+		   const unsigned char *apv, size_t apv_len,
+		   size_t keydatalen, unsigned char *out);
 
 /* AES Key Wrap / Unwrap with a raw KEK (ECDH-ES+A*KW agreed key). */
 JWT_NO_EXPORT

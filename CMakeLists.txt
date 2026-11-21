@@ -253,7 +253,13 @@ function(jwt_add_tool)
 	set(oneValueArgs NAME SRC DIR)
 	cmake_parse_arguments(Tool "" "${oneValueArgs}" "" ${ARGN})
 
+	# Hand the accumulated tool list back to the directory scope. list(APPEND)
+	# mutates only this function's own copy of TOOLS, so without the
+	# PARENT_SCOPE set() the `check` and `check-code-coverage` targets below
+	# depended on an empty ${TOOLS} and `make check` ran the CLI test before
+	# the tools were built (issue #367).
 	list(APPEND TOOLS ${Tool_NAME})
+	set(TOOLS ${TOOLS} PARENT_SCOPE)
 	add_executable(${Tool_NAME} ${Tool_SRC})
 	# Tools use only the public libjwt API; they need no crypto backend link.
 	target_link_libraries(${Tool_NAME}
@@ -426,6 +432,11 @@ if (CHECK_FOUND)
 
 	# Checker and Builder
 	list (APPEND UNIT_TESTS jwt_builder jwt_checker jwt_flipflop jwt_xbackend)
+
+	# The token a checker accepted (jwt_checker_verified_jwt())
+	list (APPEND UNIT_TESTS jwt_verified)
+	# Checker maximum token size (jwt_checker_setmaxsize)
+	list (APPEND UNIT_TESTS jwt_maxsize)
 
 	# JWS JSON Serialization (multi-signature)
 	list (APPEND UNIT_TESTS jws_json)

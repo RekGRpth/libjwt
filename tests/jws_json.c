@@ -390,18 +390,68 @@ START_TEST(test_edges)
 		ck_assert_int_eq(jwt_checker_verify(c1, t4), 0);
 	}
 
-	/* (c3) A setkey() signer still makes a Compact token, also when
-	 * setkey() follows a lone add_signature(). */
+	/* (c3) setkey() after a lone add_signature() adds a signer of its
+	 * own rather than taking that one over, even with the same key: two
+	 * signatures, so the token is promoted to General (setkey()'s first),
+	 * and a Compact one is refused. setkey(JWT_ALG_NONE, NULL) then removes
+	 * only setkey()'s signer. test_setkey_node covers every order. */
 	{
 		jwt_builder_auto_t *b5 = jwt_builder_new();
 		char_auto *t5 = NULL;
 
-		ck_assert_ptr_nonnull(jwt_builder_add_signature(b5,
-			JWT_ALG_ES256, ec));
+		sig = jwt_builder_add_signature(b5, JWT_ALG_ES256, ec);
+		ck_assert_ptr_nonnull(sig);
+		ck_assert_int_eq(jwt_signature_add_protected_json(sig, "kid",
+			"\"k5\""), 0);
 		ck_assert_int_eq(jwt_builder_setkey(b5, JWT_ALG_ES256, ec), 0);
 		t5 = jwt_builder_generate(b5);
 		ck_assert_ptr_nonnull(t5);
+		ck_assert_ptr_nonnull(strstr(t5, "\"signatures\""));
 		ck_assert_int_eq(jwt_checker_verify(c1, t5), 0);
+		ck_assert_uint_eq(jwt_checker_sig_count(c1), 2);
+		ck_assert_int_eq(jwt_checker_sig_verified(c1, 0), 1);
+		ck_assert_int_eq(jwt_checker_sig_verified(c1, 1), 1);
+
+		ck_assert_int_eq(jwt_builder_set_format(b5,
+			JWT_FORMAT_COMPACT), 0);
+		ck_assert_ptr_null(jwt_builder_generate(b5));
+		ck_assert_str_eq(jwt_builder_error_msg(b5),
+			"Compact serialization cannot carry multiple "
+			"signatures");
+
+		jwt_builder_error_clear(b5);
+		ck_assert_int_eq(jwt_builder_setkey(b5, JWT_ALG_NONE, NULL), 0);
+		ck_assert_ptr_null(jwt_builder_generate(b5));
+		ck_assert_str_eq(jwt_builder_error_msg(b5),
+			"Compact serialization cannot carry a "
+			"jwt_builder_add_signature() signer");
+	}
+
+	/* (c4) A JSON token fails, rather than drop the signature, when a
+	 * signer's key cannot sign (too short for its alg), whichever kind of
+	 * signer it is. */
+	{
+		jwk_set_t *sks = load_one("oct_key_128_too_small.json");
+		const jwk_item_t *small = jwks_item_get(sks, 0);
+		jwt_builder_auto_t *b6 = jwt_builder_new();
+		jwt_builder_auto_t *b7 = jwt_builder_new();
+
+		ck_assert_int_eq(jwt_builder_setkey(b6, JWT_ALG_ES256, ec), 0);
+		ck_assert_ptr_nonnull(jwt_builder_add_signature(b6,
+			JWT_ALG_HS256, small));
+		ck_assert_ptr_null(jwt_builder_generate(b6));
+		ck_assert_str_eq(jwt_builder_error_msg(b6),
+				 "Key too short for HS256: 128 bits");
+
+		ck_assert_int_eq(jwt_builder_setkey(b7, JWT_ALG_HS256, small),
+				 0);
+		ck_assert_ptr_nonnull(jwt_builder_add_signature(b7,
+			JWT_ALG_ES256, ec));
+		ck_assert_ptr_null(jwt_builder_generate(b7));
+		ck_assert_str_eq(jwt_builder_error_msg(b7),
+				 "Key too short for HS256: 128 bits");
+
+		jwks_free(sks);
 	}
 
 	/* (d) A verify callback runs per signature: allow then reject. */
@@ -635,9 +685,12 @@ START_TEST(test_compact_keyring)
 			ck_assert_ptr_eq(jwt_checker_sig_key(c, 0), key);
 
 			/* A "kid" not in the ring binds to nothing: there is no
-			 * fallback to the scan, though the signer IS in it. */
+			 * fallback to the scan, though the signer IS in it. The
+			 * reason names the missing "kid" (#354), not the count. */
 			ck_assert_int_ne(jwt_checker_verify(c, miss_tok), 0);
-			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+			ck_assert_str_eq(jwt_checker_error_msg(c),
+				"No signature key with \"kid\" "
+				"\"not-in-the-ring\" in the keyring");
 			ck_assert_uint_eq(jwt_checker_sig_count(c), 1);
 			ck_assert_int_eq(jwt_checker_sig_verified(c, 0), 0);
 			ck_assert_ptr_null(jwt_checker_sig_key(c, 0));
@@ -645,9 +698,17 @@ START_TEST(test_compact_keyring)
 
 		/* A "kid" naming another ring key binds to that key, which the
 		 * alg/key-type binding (another family) or its "alg" pin (the
-		 * other RSA key) refuses for this token. */
+		 * other RSA key) refuses for this token. The bound key's own
+		 * reason is reported (#354): a key-type mismatch across families,
+		 * or (RS256 vs PS256, both "kty":"RSA") an "alg" mismatch. */
 		for (j = 0; j < ARRAY_SIZE(ckeys); j++) {
 			char_auto *x = NULL;
+			/* RS256 (ckeys[1]) and PS256 (ckeys[2]) are both RSA. */
+			int same_kty = (i == 1 || i == 2) &&
+					(j == 1 || j == 2);
+			const char *want = same_kty ?
+				"Key alg does not match JWT" :
+				"Key type does not match JWT alg";
 
 			if (j == i)
 				continue;
@@ -659,20 +720,24 @@ START_TEST(test_compact_keyring)
 				ck_assert_int_eq(jwt_checker_setkeyring(c, ring,
 					both_pol[p]), 0);
 				ck_assert_int_ne(jwt_checker_verify(c, x), 0);
-				ck_assert_str_eq(jwt_checker_error_msg(c),
-						 ERR_POLICY_1);
+				ck_assert_str_eq(jwt_checker_error_msg(c), want);
 			}
 		}
 
-		/* Without the signer, nothing else in the ring verifies it. */
+		/* Without the signer, no ring key is even compatible: the reason
+		 * names the algorithm none can verify (#354). */
 		others = ckeys_ring(CKEYS_ALL & ~(1u << i));
 		for (p = 0; p < ARRAY_SIZE(both_pol); p++) {
 			jwt_checker_auto_t *c = jwt_checker_new();
+			char_auto *want = NULL;
 
+			ck_assert_int_gt(asprintf(&want,
+				"No keyring key can verify \"%s\"",
+				jwt_alg_str(ckeys[i].alg)), 0);
 			ck_assert_int_eq(jwt_checker_setkeyring(c, others,
 				both_pol[p]), 0);
 			ck_assert_int_ne(jwt_checker_verify(c, scan_tok), 0);
-			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+			ck_assert_str_eq(jwt_checker_error_msg(c), want);
 		}
 		jwks_free(others);
 	}
@@ -806,14 +871,20 @@ START_TEST(test_compact_keyring_confusion)
 		ck_assert_ptr_eq(jwt_checker_sig_key(c, 0), rsa_noalg);
 
 		/* Its "kid" naming the oct key binds to a key that can never
-		 * verify RS256. */
+		 * verify RS256: the key-type mismatch is reported (#354). */
 		ck_assert_int_ne(jwt_checker_verify(c, rs_octkid), 0);
-		ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+		ck_assert_str_eq(jwt_checker_error_msg(c),
+				 "Key type does not match JWT alg");
 
-		/* No forgery gets an RSA key used as an HMAC secret. */
+		/* No forgery gets an RSA key used as an HMAC secret. The first
+		 * two carry no "kid" (only the oct key is a compatible HS256
+		 * candidate, and the MAC does not match); the rest name an RSA
+		 * key by "kid", which cannot carry HS256 (#354). */
 		for (i = 0; i < ARRAY_SIZE(forged_hs256); i++) {
 			ck_assert_int_ne(jwt_checker_verify(c, forged_hs256[i]), 0);
-			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+			ck_assert_str_eq(jwt_checker_error_msg(c), i < 2 ?
+				"Token failed verification" :
+				"Key type does not match JWT alg");
 			ck_assert_int_eq(jwt_checker_sig_verified(c, 0), 0);
 		}
 	}
@@ -845,15 +916,19 @@ START_TEST(test_compact_keyring_algs)
 	ck_assert_ptr_nonnull(rs512);
 	ck_assert_ptr_nonnull(rs512_kid);
 
-	/* Pinned to RS256: the same key refuses RS512, scanned or by kid. */
+	/* Pinned to RS256: the same key refuses RS512, scanned or by kid. The
+	 * scan finds no compatible key; the kid binds the key, whose "alg" pin
+	 * then rejects it (#354). */
 	pinned = ckeys_ring(1u << 1);
 	c1 = jwt_checker_new();
 	ck_assert_int_eq(jwt_checker_setkeyring(c1, pinned,
 		JWT_VERIFY_POLICY_ANY), 0);
 	ck_assert_int_ne(jwt_checker_verify(c1, rs512), 0);
-	ck_assert_str_eq(jwt_checker_error_msg(c1), ERR_POLICY_1);
+	ck_assert_str_eq(jwt_checker_error_msg(c1),
+			 "No keyring key can verify \"RS512\"");
 	ck_assert_int_ne(jwt_checker_verify(c1, rs512_kid), 0);
-	ck_assert_str_eq(jwt_checker_error_msg(c1), ERR_POLICY_1);
+	ck_assert_str_eq(jwt_checker_error_msg(c1),
+			 "Key alg does not match JWT");
 
 	/* Control: without the pin the very same tokens verify. */
 	c2 = jwt_checker_new();
@@ -886,7 +961,8 @@ START_TEST(test_compact_keyring_algs)
 		ck_assert_int_eq(jwt_checker_verify(c, es), 0);
 		ck_assert_ptr_eq(jwt_checker_sig_key(c, 0), ec);
 		ck_assert_int_ne(jwt_checker_verify(c, rs), 0);
-		ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+		ck_assert_str_eq(jwt_checker_error_msg(c),
+				 "Token rejected by \"typ\" or algorithm policy");
 		for (i = 0; i < ARRAY_SIZE(forged_none); i++) {
 			ck_assert_int_ne(jwt_checker_verify(c, forged_none[i]), 0);
 			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_BAD_ALG);
@@ -971,7 +1047,8 @@ START_TEST(test_compact_keyring_cb)
 	ck_assert_int_eq(jwt_checker_setkeyring(c2, octring,
 		JWT_VERIFY_POLICY_ANY), 0);
 	ck_assert_int_ne(jwt_checker_verify(c2, scan), 0);
-	ck_assert_str_eq(jwt_checker_error_msg(c2), ERR_POLICY_1);
+	ck_assert_str_eq(jwt_checker_error_msg(c2),
+			 "No keyring key can verify \"ES256\"");
 	over.key = ec;
 	ck_assert_int_eq(jwt_checker_setcb(c2, cb_ring, &over), 0);
 	ck_assert_int_eq(jwt_checker_verify(c2, scan), 0);
@@ -987,7 +1064,8 @@ START_TEST(test_compact_keyring_cb)
 		JWT_VERIFY_POLICY_ANY), 0);
 	ck_assert_int_eq(jwt_checker_setcb(c3, cb_ring, &deny), 0);
 	ck_assert_int_ne(jwt_checker_verify(c3, kid), 0);
-	ck_assert_str_eq(jwt_checker_error_msg(c3), ERR_POLICY_1);
+	ck_assert_str_eq(jwt_checker_error_msg(c3),
+			 "User callback returned error");
 	ck_assert_int_eq(deny.calls, 1);
 	ck_assert_int_eq(jwt_checker_sig_verified(c3, 0), 0);
 
@@ -1011,7 +1089,7 @@ START_TEST(test_compact_keyring_b64)
 	jwk_set_t *ring;
 	const jwk_item_t *ec;
 	char_auto *tok = NULL, *bad = NULL, *det = NULL, *det64 = NULL;
-	char_auto *bin = NULL;
+	char_auto *bin = NULL, *bindet = NULL;
 	jwt_checker_auto_t *one = NULL;
 	char *p;
 	size_t i;
@@ -1070,8 +1148,14 @@ START_TEST(test_compact_keyring_b64)
 		ck_assert_int_eq(jwt_checker_verify(c, tok), 0);
 		ck_assert_uint_eq(jwt_checker_sig_count(c), 1);
 		ck_assert_ptr_eq(jwt_checker_sig_key(c, 0), ec);
+		/* A tampered payload now surfaces the backend's specific verify
+		 * failure (#354), not the generic policy count. The exact
+		 * wording is backend-specific (e.g. OpenSSL/MbedTLS "...Failed
+		 * to verify signature", GnuTLS phrases ECDSA differently), so
+		 * assert only that it is a specific, non-generic reason. */
 		ck_assert_int_ne(jwt_checker_verify(c, bad), 0);
-		ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+		ck_assert_str_ne(jwt_checker_error_msg(c), ERR_POLICY_1);
+		ck_assert_str_ne(jwt_checker_error_msg(c), "");
 
 		/* Detached, unencoded and base64url. */
 		ck_assert_int_eq(jwt_checker_verify_detached(c, det,
@@ -1107,21 +1191,36 @@ START_TEST(test_compact_keyring_b64)
 		bin = jwt_builder_generate(b);
 		ck_assert_ptr_nonnull(bin);
 	}
+	{
+		jwt_builder_auto_t *b = jwt_builder_new();
+
+		ck_assert_int_eq(jwt_builder_setkey(b, JWT_ALG_ES256, ec), 0);
+		ck_assert_int_eq(jwt_builder_setpayload(b, binary,
+			sizeof(binary) - 1), 0);
+		ck_assert_int_eq(jwt_builder_setb64(b, 0), 0);
+		ck_assert_int_eq(jwt_builder_set_detached(b, 1), 0);
+		bindet = jwt_builder_generate(b);
+		ck_assert_ptr_nonnull(bindet);
+	}
 	one = jwt_checker_new();
 	ck_assert_int_eq(jwt_checker_setkey(one, JWT_ALG_ES256, ec), 0);
 	ck_assert_int_eq(jwt_checker_verify(one, bin), 0);
+	ck_assert_int_eq(jwt_checker_verify_detached(one, bindet, binary,
+		sizeof(binary) - 1), 0);
 	ck_assert_int_eq(jwt_checker_setkeyring(one, ring,
 		JWT_VERIFY_POLICY_ANY), 0);
-#ifdef HAVE_JSON_C
-	/* json-c carries any bytes in a JSON string, so the keyring verifies
-	 * the exact signed bytes. */
+	/* So does the keyring, under either JSON backend: a Compact token is
+	 * checked over its own bytes, never carried in a JSON string, so its
+	 * payload need not be valid UTF-8 even with Jansson (#355). */
 	ck_assert_int_eq(jwt_checker_verify(one, bin), 0);
 	ck_assert_ptr_eq(jwt_checker_sig_key(one, 0), ec);
-#else
-	/* Jansson cannot hold it in a JSON string: fail closed, with a reason. */
-	ck_assert_int_ne(jwt_checker_verify(one, bin), 0);
-	ck_assert_str_eq(jwt_checker_error_msg(one), "Token is not valid UTF-8");
-#endif
+	ck_assert_int_eq(jwt_checker_verify_detached(one, bindet, binary,
+		sizeof(binary) - 1), 0);
+	ck_assert_ptr_eq(jwt_checker_sig_key(one, 0), ec);
+	/* Not the bytes that were signed: no longer verifies. */
+	ck_assert_int_ne(jwt_checker_verify_detached(one, bindet, binary,
+		sizeof(binary) - 2), 0);
+	ck_assert_str_ne(jwt_checker_error_msg(one), "");
 
 	jwks_free(ring);
 }
@@ -1361,8 +1460,7 @@ START_TEST(test_json_alg_pin)
 			look.seen = JWT_ALG_NONE;
 			ck_assert_int_ne(jwt_checker_verify(c1, t), 0);
 			ck_assert_str_eq(jwt_checker_error_msg(c1),
-				all_fmt[f] == JWT_FORMAT_COMPACT ?
-				"Config alg does not match JWT" : ERR_POLICY_1);
+				"Config alg does not match JWT");
 			ck_assert_int_eq(look.seen, JWT_ALG_RS256);
 
 			/* The callback may pin another algorithm instead. */
@@ -1392,7 +1490,7 @@ START_TEST(test_json_alg_pin)
 				ck_assert_int_eq(jwt_checker_verify(c, rs), 0);
 				ck_assert_int_ne(jwt_checker_verify(c, t), 0);
 				ck_assert_str_eq(jwt_checker_error_msg(c),
-						 ERR_POLICY_1);
+					"Config alg does not match JWT");
 			}
 		}
 	}
@@ -1421,9 +1519,13 @@ START_TEST(test_json_alg_pin)
 
 		ck_assert_int_eq(jwt_checker_setcb(c, cb_pin, &pin), 0);
 		if (both_pol[p] == JWT_VERIFY_POLICY_ALL) {
+			/* A multi-signature token keeps the policy summary and
+			 * appends the first unverified signature's index and
+			 * reason (#354). */
 			ck_assert_int_ne(jwt_checker_verify(c, two), 0);
 			ck_assert_str_eq(jwt_checker_error_msg(c),
-				"Signature policy not met (1 of 2 verified)");
+				"Signature policy not met (1 of 2 verified); "
+				"signature 1: Config alg does not match JWT");
 		} else {
 			ck_assert_int_eq(jwt_checker_verify(c, two), 0);
 		}
@@ -1742,11 +1844,12 @@ START_TEST(test_keyring_key_use)
 		for (p = 0; p < ARRAY_SIZE(both_pol); p++) {
 			jwt_checker_auto_t *c = jwt_checker_new();
 
-			/* The scan skips them all... */
+			/* The scan skips them all: no compatible key (#354). */
 			ck_assert_int_eq(jwt_checker_setkeyring(c, bad,
 				both_pol[p]), 0);
 			ck_assert_int_ne(jwt_checker_verify(c, scan), 0);
-			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+			ck_assert_str_eq(jwt_checker_error_msg(c),
+					 "No keyring key can verify \"HS256\"");
 
 			/* ...for the first key that may verify. */
 			ck_assert_int_eq(jwt_checker_setkeyring(c, ring,
@@ -1765,10 +1868,17 @@ START_TEST(test_keyring_key_use)
 						 jwks_item_kid(k)), 0);
 				t = fmt_tok(JWT_ALG_HS256, key, hdr, fmt);
 				if (i < ARRAY_SIZE(not_verify)) {
+					char_auto *want = NULL;
+
+					/* The "kid" binds to no usable key: the
+					 * reason names the missing "kid" (#354). */
+					ck_assert_int_gt(asprintf(&want,
+						"No signature key with \"kid\" \"%s\" "
+						"in the keyring", jwks_item_kid(k)), 0);
 					ck_assert_int_ne(jwt_checker_verify(c, t),
 							 0);
 					ck_assert_str_eq(jwt_checker_error_msg(c),
-							 ERR_POLICY_1);
+							 want);
 				} else {
 					ck_assert_int_eq(jwt_checker_verify(c, t),
 							 0);
@@ -1848,10 +1958,866 @@ START_TEST(test_keyring_key_use)
 }
 END_TEST
 
+/* A verify callback that removes the key the checker was given, to reach the
+ * JSON path's keyless-after-callback case (its reason stays the bare policy
+ * summary). */
+static int cb_drop_key(jwt_t *jwt, jwt_config_t *config)
+{
+	(void)jwt;
+	config->key = NULL;
+	return 0;
+}
+
+/* ====================================================================
+ * #354: a JWS JSON Serialization / keyring verify failure surfaces the
+ * specific per-signature reason -- the same the single-key Compact path gives
+ * -- not only "Signature policy not met". These assertions are deliberately
+ * backend-agnostic: the HMAC mismatch reason ("Token failed verification") and
+ * the key-selection reasons are identical on every crypto provider.
+ * ==================================================================== */
+START_TEST(test_msg_unify)
+{
+	/* oct_key_256 signs; oct_key_256_issue1/issue2 are DIFFERENT HS256
+	 * secrets that cannot verify its tokens. */
+	jwk_set_t *signer_ks, *wrong_ks;
+	const jwk_item_t *signer, *wrong;
+	char_auto *compact = NULL, *flat = NULL;
+	size_t f;
+
+	SET_OPS();
+
+	signer_ks = load_one("oct_key_256.json");
+	signer = jwks_item_get(signer_ks, 0);
+	wrong_ks = load_one("oct_key_256_issue1.json");
+	wrong = jwks_item_get(wrong_ks, 0);
+
+	compact = fmt_tok(JWT_ALG_HS256, signer, NULL, JWT_FORMAT_COMPACT);
+	flat = fmt_tok(JWT_ALG_HS256, signer, NULL, JWT_FORMAT_JSON_FLAT);
+
+	/* (1) The issue itself: a wrong secret gives ONE specific reason on
+	 * every combination -- Compact or Flattened, jwt_checker_setkey() or a
+	 * keyring -- instead of the generic count only setkey+Compact escaped. */
+	for (f = 0; f < 2; f++) {
+		const char *tok = f ? flat : compact;
+		jwt_checker_auto_t *ck = jwt_checker_new();
+		jwt_checker_auto_t *cr = jwt_checker_new();
+
+		ck_assert_int_eq(jwt_checker_setkey(ck, JWT_ALG_NONE, wrong), 0);
+		ck_assert_int_ne(jwt_checker_verify(ck, tok), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(ck),
+				 "Token failed verification");
+
+		ck_assert_int_eq(jwt_checker_setkeyring(cr, wrong_ks,
+			JWT_VERIFY_POLICY_ANY), 0);
+		ck_assert_int_ne(jwt_checker_verify(cr, tok), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(cr),
+				 "Token failed verification");
+	}
+
+	/* (2) Several compatible candidates, none the signer: a count, not a
+	 * repeat of each identical reason. */
+	{
+		jwk_set_t *ring2 = jwks_create(NULL);
+		jwt_checker_auto_t *c = jwt_checker_new();
+
+		ck_assert_ptr_nonnull(ring2);
+		ck_assert_ptr_nonnull(jwks_load_fromfile(ring2,
+			KEYDIR "/oct_key_256_issue1.json"));
+		ck_assert_ptr_nonnull(jwks_load_fromfile(ring2,
+			KEYDIR "/oct_key_256_issue2.json"));
+		ck_assert_uint_eq(jwks_item_count(ring2), 2);
+
+		ck_assert_int_eq(jwt_checker_setkeyring(c, ring2,
+			JWT_VERIFY_POLICY_ANY), 0);
+		ck_assert_int_ne(jwt_checker_verify(c, compact), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(c),
+			"No keyring key verified the signature (2 tried)");
+		jwks_free(ring2);
+	}
+
+	/* (3) An earlier candidate fails and a later one verifies: the failed
+	 * attempt's error must not leak, so the verify succeeds with no error. */
+	{
+		jwk_set_t *mixed = jwks_create(NULL);
+		jwt_checker_auto_t *c = jwt_checker_new();
+
+		ck_assert_ptr_nonnull(mixed);
+		ck_assert_ptr_nonnull(jwks_load_fromfile(mixed,
+			KEYDIR "/oct_key_256_issue1.json"));	/* wrong, first */
+		ck_assert_ptr_nonnull(jwks_load_fromfile(mixed,
+			KEYDIR "/oct_key_256.json"));		/* signer, next */
+		ck_assert_int_eq(jwt_checker_setkeyring(c, mixed,
+			JWT_VERIFY_POLICY_ANY), 0);
+		ck_assert_int_eq(jwt_checker_verify(c, compact), 0);
+		ck_assert_int_eq(jwt_checker_error(c), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(c), "");
+		ck_assert_int_eq(jwt_checker_sig_verified(c, 0), 1);
+		jwks_free(mixed);
+	}
+
+	/* (4) A callback that removes the key leaves no reason to report, so
+	 * the bare policy summary stands (the fallback). */
+	{
+		jwt_checker_auto_t *c = jwt_checker_new();
+
+		ck_assert_int_eq(jwt_checker_setkey(c, JWT_ALG_HS256, signer), 0);
+		ck_assert_int_eq(jwt_checker_setcb(c, cb_drop_key, NULL), 0);
+		ck_assert_int_ne(jwt_checker_verify(c, flat), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(c),
+				 "Signature policy not met (0 of 1 verified)");
+	}
+
+	jwks_free(signer_ks);
+	jwks_free(wrong_ks);
+}
+END_TEST
+
+/* ---- A large keyring scanned for a kid-less token (#356) ---- */
+
+/* The size of the generated keyring: 10,000 "oct" keys, the size #356
+ * measured. The scan used to fetch each key by index, walking the ring from its
+ * head every time. This test checks behavior only: ring order, the first key
+ * that verifies, the number of keys tried and the reject messages. It does not
+ * check the scan's complexity, and the old quadratic scan passes it too. No
+ * timeout can tell the two apart: the linear scan under valgrind is slower than
+ * the quadratic one run natively. */
+#define BIG_RING_N 10000
+
+/* The signer: a 33-byte HS256 key that is no filler key. It carries a "kid" to
+ * identify it in the ring, but the tokens below have none, so the ring is
+ * scanned. */
+#define BIG_RING_SIGNER "{\"kty\":\"oct\",\"alg\":\"HS256\",\"kid\":\"last\"," \
+	"\"k\":\"BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB\"}"
+
+/* A JWKS of @n distinct 33-byte HS256 keys, none of them the signer's. */
+static char *big_ring_json(size_t n)
+{
+	/* ,{"kty":"oct","alg":"HS256","k":"<36 x A><8 digits>"} is 79 bytes */
+	const size_t per = 96;
+	char *json, ent[96];
+	size_t i, cap, off;
+	int len;
+
+	cap = 16 + n * per;
+	json = malloc(cap);
+	ck_assert_ptr_nonnull(json);
+
+	memcpy(json, "{\"keys\":[", 9);
+	off = 9;
+	for (i = 0; i < n; i++) {
+		/* Each entry goes to a fixed buffer first, so no snprintf
+		 * size is ever derived from a previous return value. */
+		len = snprintf(ent, sizeof(ent), "%s{\"kty\":\"oct\","
+			       "\"alg\":\"HS256\","
+			       "\"k\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+			       "%08zu\"}", i ? "," : "", i);
+		ck_assert_int_gt(len, 0);
+		ck_assert_uint_lt((size_t)len, sizeof(ent));
+		ck_assert_uint_lt(off + (size_t)len + 3, cap);
+		memcpy(json + off, ent, (size_t)len);
+		off += (size_t)len;
+	}
+	memcpy(json + off, "]}", 3);
+
+	return json;
+}
+
+static void big_ring_reject(const jwk_set_t *ring, const char *tok,
+			    const char *want)
+{
+	size_t p;
+
+	for (p = 0; p < ARRAY_SIZE(both_pol); p++) {
+		jwt_checker_auto_t *c = jwt_checker_new();
+
+		ck_assert_int_eq(jwt_checker_setkeyring(c, ring, both_pol[p]),
+				 0);
+		ck_assert_int_ne(jwt_checker_verify(c, tok), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(c), want);
+		ck_assert_uint_eq(jwt_checker_sig_count(c), 1);
+		ck_assert_int_eq(jwt_checker_sig_verified(c, 0), 0);
+		ck_assert_ptr_null(jwt_checker_sig_key(c, 0));
+	}
+}
+
+static void big_ring_accept(const jwk_set_t *ring, const char *tok,
+			    const jwk_item_t *want)
+{
+	size_t p;
+
+	for (p = 0; p < ARRAY_SIZE(both_pol); p++) {
+		jwt_checker_auto_t *c = jwt_checker_new();
+
+		ck_assert_int_eq(jwt_checker_setkeyring(c, ring, both_pol[p]),
+				 0);
+		ck_assert_int_eq(jwt_checker_verify(c, tok), 0);
+		ck_assert_uint_eq(jwt_checker_sig_count(c), 1);
+		ck_assert_int_eq(jwt_checker_sig_verified(c, 0), 1);
+		ck_assert_ptr_eq(jwt_checker_sig_key(c, 0), want);
+	}
+}
+
+START_TEST(test_keyring_scan_large)
+{
+	char_auto *json = NULL, *tok = NULL, *tok512 = NULL, *want = NULL;
+	jwk_set_t *ring, *signer_ks, *other_ks;
+	const jwk_item_t *signer, *last;
+
+	SET_OPS();
+
+	json = big_ring_json(BIG_RING_N - 1);
+	ring = jwks_create(json);
+	ck_assert_ptr_nonnull(ring);
+	ck_assert_int_eq(jwks_error_any(ring), 0);
+	ck_assert_uint_eq(jwks_item_count(ring), BIG_RING_N - 1);
+
+	signer_ks = jwks_create(BIG_RING_SIGNER);
+	ck_assert_ptr_nonnull(signer_ks);
+	signer = jwks_item_get(signer_ks, 0);
+	ck_assert_ptr_nonnull(signer);
+	tok = compact_tok(JWT_ALG_HS256, signer, NULL);
+	ck_assert_ptr_nonnull(tok);
+
+	/* An HS512 token, signed with a 66-byte key that is in no ring. */
+	other_ks = jwks_create("{\"kty\":\"oct\",\"k\":\""
+		"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+		"CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC\"}");
+	ck_assert_ptr_nonnull(other_ks);
+	tok512 = compact_tok(JWT_ALG_HS512, jwks_item_get(other_ks, 0), NULL);
+	ck_assert_ptr_nonnull(tok512);
+
+	/* The signer is absent: every HS256 key is tried and none verifies. */
+	ck_assert_int_gt(asprintf(&want, "No keyring key verified the "
+				  "signature (%d tried)", BIG_RING_N - 1), 0);
+	big_ring_reject(ring, tok, want);
+
+	/* No ring key has the token's alg: each one is skipped untried. */
+	big_ring_reject(ring, tok512, "No keyring key can verify \"HS512\"");
+
+	/* With the signer last in the ring, the scan reaches and reports it. */
+	ck_assert_ptr_nonnull(jwks_load(ring, BIG_RING_SIGNER));
+	ck_assert_uint_eq(jwks_item_count(ring), BIG_RING_N);
+	last = jwks_item_get(ring, BIG_RING_N - 1);
+	ck_assert_ptr_nonnull(last);
+	ck_assert_str_eq(jwks_item_kid(last), "last");
+	big_ring_accept(ring, tok, last);
+
+	/* Ring order is kept: a second copy of the signer after it is never
+	 * reached, so the first key that verifies is still the one reported. */
+	ck_assert_ptr_nonnull(jwks_load(ring, BIG_RING_SIGNER));
+	ck_assert_uint_eq(jwks_item_count(ring), BIG_RING_N + 1);
+	ck_assert_ptr_ne(jwks_item_get(ring, BIG_RING_N), last);
+	big_ring_accept(ring, tok, last);
+
+	/* The signer's alg still pins it: the HS512 token is refused. */
+	big_ring_reject(ring, tok512, "No keyring key can verify \"HS512\"");
+
+	jwks_free(other_ks);
+	jwks_free(signer_ks);
+	jwks_free(ring);
+}
+END_TEST
+
+/* ---- One signature, several candidates: the same result each way ---- */
+START_TEST(test_compact_keyring_candidates)
+{
+	jwk_set_t *ring;
+	const jwk_item_t *signer;
+	char_auto *tok = NULL, *flat = NULL, *undec = NULL, *flip = NULL;
+	char *sig;
+	size_t p;
+
+	SET_OPS();
+
+	/* Two RSA keys and no "kid": an RS384 signature is tried against the
+	 * first ("alg"-less) key, fails, then verifies with the second. */
+	ring = jwks_create(NULL);
+	ck_assert_ptr_nonnull(ring);
+	ck_assert_ptr_nonnull(jwks_load_fromfile(ring,
+		KEYDIR "/rsa_key_2048_no_alg.json"));
+	ck_assert_ptr_nonnull(jwks_load_fromfile(ring,
+		KEYDIR "/rsa_key_4096.json"));
+	ck_assert_int_eq(jwks_error_any(ring), 0);
+	signer = jwks_item_get(ring, 1);
+	ck_assert_int_eq(jwks_item_alg(signer), JWT_ALG_RS384);
+
+	tok = compact_tok(JWT_ALG_RS384, signer, NULL);
+	ck_assert_ptr_nonnull(tok);
+	{
+		jwt_builder_auto_t *b = jwt_builder_new();
+		jwt_value_t v;
+
+		ck_assert_int_eq(jwt_builder_setkey(b, JWT_ALG_RS384, signer),
+				 0);
+		ck_assert_int_eq(jwt_builder_set_format(b,
+			JWT_FORMAT_JSON_FLAT), 0);
+		jwt_set_SET_STR(&v, "sub", "alice");
+		ck_assert_int_eq(jwt_builder_claim_set(b, &v),
+				 JWT_VALUE_ERR_NONE);
+		flat = jwt_builder_generate(b);
+		ck_assert_ptr_nonnull(flat);
+	}
+
+	/* The signature, not valid base64url (decoding fails for every
+	 * candidate), and with one bit changed (it decodes, verifies with
+	 * none). */
+	undec = strdup(tok);
+	ck_assert_ptr_nonnull(undec);
+	sig = strrchr(undec, '.') + 1;
+	sig[0] = '*';
+	flip = strdup(tok);
+	ck_assert_ptr_nonnull(flip);
+	sig = strrchr(flip, '.') + 1;
+	sig[0] = (sig[0] == 'A') ? 'B' : 'A';
+
+	for (p = 0; p < ARRAY_SIZE(both_pol); p++) {
+		jwt_checker_auto_t *c = jwt_checker_new();
+
+		ck_assert_int_eq(jwt_checker_setkeyring(c, ring, both_pol[p]),
+				 0);
+
+		ck_assert_int_eq(jwt_checker_verify(c, tok), 0);
+		ck_assert_ptr_eq(jwt_checker_sig_key(c, 0), signer);
+		ck_assert_int_eq(jwt_checker_verify(c, flat), 0);
+		ck_assert_ptr_eq(jwt_checker_sig_key(c, 0), signer);
+
+		ck_assert_int_ne(jwt_checker_verify(c, undec), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(c), "No keyring key "
+				 "verified the signature (2 tried)");
+		ck_assert_int_eq(jwt_checker_sig_verified(c, 0), 0);
+		ck_assert_int_ne(jwt_checker_verify(c, flip), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(c), "No keyring key "
+				 "verified the signature (2 tried)");
+	}
+
+	/* One candidate: its own reason, as on the single-key path. */
+	{
+		jwt_checker_auto_t *c = jwt_checker_new();
+		jwk_set_t *one = jwks_create(NULL);
+
+		ck_assert_ptr_nonnull(jwks_load_fromfile(one,
+			KEYDIR "/rsa_key_4096.json"));
+		ck_assert_int_eq(jwt_checker_setkeyring(c, one,
+			JWT_VERIFY_POLICY_ANY), 0);
+		ck_assert_int_ne(jwt_checker_verify(c, undec), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(c),
+				 "Error decoding signature");
+		ck_assert_int_eq(jwt_checker_verify(c, tok), 0);
+		jwks_free(one);
+	}
+
+	jwks_free(ring);
+}
+END_TEST
+
+/* A malloc() that adds up what is asked of it, through jwt_set_alloc(). The
+ * plain free() lets memory cross between it and the default allocator. */
+static size_t alloc_total;
+
+static void *count_malloc(size_t size)
+{
+	alloc_total += size;
+
+	return malloc(size);
+}
+
+static void count_free(void *ptr)
+{
+	free(ptr);
+}
+
+/* Bytes allocated (through jwt_set_alloc()) by one verify of @tok by @c. */
+static size_t verify_alloc(jwt_checker_t *c, const char *tok)
+{
+	size_t total;
+	int ret;
+
+	ck_assert_int_eq(jwt_set_alloc(count_malloc, count_free), 0);
+	alloc_total = 0;
+	ret = jwt_checker_verify(c, tok);
+	total = alloc_total;
+	ck_assert_int_eq(jwt_set_alloc(NULL, NULL), 0);
+	ck_assert_int_eq(ret, 0);
+
+	return total;
+}
+
+#define BIG_CLAIM_LEN (256 * 1024)
+
+/* ---- A keyring of one costs about what jwt_checker_setkey() does ---- */
+START_TEST(test_compact_keyring_alloc)
+{
+	jwt_checker_auto_t *single = NULL, *ringed = NULL;
+	char_auto *blob = NULL, *tok = NULL;
+	jwk_set_t *ks, *ring;
+	const jwk_item_t *key;
+	size_t by_key, by_ring;
+
+	SET_OPS();
+
+	ks = load_one("oct_key_256.json");
+	key = jwks_item_get(ks, 0);
+	ring = load_one("oct_key_256.json");
+
+	/* A Compact token of some 350 KB: one long string claim. */
+	blob = malloc(BIG_CLAIM_LEN + 1);
+	ck_assert_ptr_nonnull(blob);
+	memset(blob, 'a', BIG_CLAIM_LEN);
+	blob[BIG_CLAIM_LEN] = '\0';
+	{
+		jwt_builder_auto_t *b = jwt_builder_new();
+		jwt_value_t v;
+
+		ck_assert_int_eq(jwt_builder_setkey(b, JWT_ALG_HS256, key), 0);
+		jwt_set_SET_STR(&v, "blob", blob);
+		ck_assert_int_eq(jwt_builder_claim_set(b, &v),
+				 JWT_VALUE_ERR_NONE);
+		tok = jwt_builder_generate(b);
+		ck_assert_ptr_nonnull(tok);
+	}
+	ck_assert_uint_gt(strlen(tok), BIG_CLAIM_LEN);
+
+	single = jwt_checker_new();
+	ck_assert_int_eq(jwt_checker_setkey(single, JWT_ALG_HS256, key), 0);
+	ringed = jwt_checker_new();
+	ck_assert_int_eq(jwt_checker_setkeyring(ringed, ring,
+		JWT_VERIFY_POLICY_ANY), 0);
+
+	/* Once each first, so nothing set up on a first use is counted. */
+	ck_assert_int_eq(jwt_checker_verify(single, tok), 0);
+	ck_assert_int_eq(jwt_checker_verify(ringed, tok), 0);
+
+	by_key = verify_alloc(single, tok);
+	by_ring = verify_alloc(ringed, tok);
+	ck_assert_ptr_eq(jwt_checker_sig_key(ringed, 0),
+			 jwks_item_get(ring, 0));
+
+	/* The token is decoded either way, and (with Jansson, whose allocations
+	 * are counted too) parsed. Converting it to JSON and parsing that again
+	 * more than doubled the keyring's share (#355); now it is no more than
+	 * about the single key's. */
+	ck_assert_uint_gt(by_key, BIG_CLAIM_LEN);
+	ck_assert_uint_lt(by_ring, by_key + by_key / 2);
+
+	jwks_free(ring);
+	jwks_free(ks);
+}
+END_TEST
+
+/* ====================================================================
+ * #361: jwt_builder_setkey() owns one signer node of its own, first in the
+ * list; it never takes over a jwt_builder_add_signature() signer, whatever
+ * the call order, and the builder callback's key makes that signer's
+ * signature in every serialization.
+ *
+ * Keys: A = ES256 (P-256), B = RS256, C = ES384 (P-384). Every signature is
+ * checked against each key, so each must verify with its own key and no
+ * other, and an add_signature() signer must carry its own protected "kid"
+ * (the key's letter), where the setkey() signer carries none.
+ * ==================================================================== */
+
+enum { K_A, K_B, K_C, K_NUM };
+
+static const char * const sn_file[K_NUM] = {
+	"ec_key_prime256v1.json", "rsa_key_2048.json", "ec_key_secp384r1.json",
+};
+static const jwt_alg_t sn_alg[K_NUM] = {
+	JWT_ALG_ES256, JWT_ALG_RS256, JWT_ALG_ES384,
+};
+static const char * const sn_kid[K_NUM] = { "A", "B", "C" };
+
+#define SN_MAX	3
+
+/* One expected signature: the key it verifies with, and whether it is an
+ * add_signature() signer (so it carries that key's "kid"). */
+struct sn_sig {
+	int k;
+	int kid;
+};
+
+/* Decode base64url @in (@len chars) into a NUL-terminated malloc'd string. */
+static char *b64url_dec(const char *in, size_t len)
+{
+	static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+		"abcdefghijklmnopqrstuvwxyz0123456789-_";
+	char *out = malloc(len + 1);
+	unsigned int acc = 0;
+	int bits = 0;
+	size_t i, o = 0;
+
+	ck_assert_ptr_nonnull(out);
+	for (i = 0; i < len; i++) {
+		const char *p = strchr(tbl, in[i]);
+
+		ck_assert_ptr_nonnull(p);
+		acc = (acc << 6) | (unsigned int)(p - tbl);
+		bits += 6;
+		if (bits >= 8) {
+			bits -= 8;
+			out[o++] = (char)((acc >> bits) & 0xff);
+		}
+	}
+	out[o] = '\0';
+
+	return out;
+}
+
+/* The protected header of each signature of @tok, decoded, in token order.
+ * Returns how many there are. */
+static int sn_headers(const char *tok, char *hdr[SN_MAX])
+{
+	static const char mark[] = "\"protected\":\"";
+	const char *p = tok;
+	int n = 0;
+
+	if (tok[0] != '{') {
+		const char *dot = strchr(tok, '.');
+
+		ck_assert_ptr_nonnull(dot);
+		hdr[0] = b64url_dec(tok, (size_t)(dot - tok));
+		return 1;
+	}
+
+	while ((p = strstr(p, mark)) != NULL) {
+		const char *end;
+
+		p += strlen(mark);
+		end = strchr(p, '"');
+		ck_assert_ptr_nonnull(end);
+		ck_assert_int_lt(n, SN_MAX);
+		hdr[n++] = b64url_dec(p, (size_t)(end - p));
+		p = end;
+	}
+
+	return n;
+}
+
+/* @tok must be in @fmt and carry exactly the @n signatures @want, in order:
+ * each verifies with its own key and no other, has its key's "alg", and
+ * carries its own "kid" if, and only if, add_signature() made it. */
+static void sn_check(const char *tok, jwt_serialization_t fmt,
+		     const struct sn_sig *want, int n,
+		     const jwk_item_t *keys[K_NUM])
+{
+	char *hdr[SN_MAX] = { NULL, NULL, NULL };
+	int i, k;
+
+	ck_assert_ptr_nonnull(tok);
+	switch (fmt) {
+	case JWT_FORMAT_COMPACT:
+		ck_assert_int_ne(tok[0], '{');
+		break;
+	case JWT_FORMAT_JSON_FLAT:
+		ck_assert_int_eq(tok[0], '{');
+		ck_assert_ptr_null(strstr(tok, "\"signatures\""));
+		break;
+	default:
+		ck_assert_ptr_nonnull(strstr(tok, "\"signatures\""));
+		break;
+	}
+
+	ck_assert_int_eq(sn_headers(tok, hdr), n);
+	for (i = 0; i < n; i++) {
+		char_auto *alg = NULL, *kid = NULL;
+
+		ck_assert_int_gt(asprintf(&alg, "\"alg\":\"%s\"",
+					  jwt_alg_str(sn_alg[want[i].k])), 0);
+		ck_assert_ptr_nonnull(strstr(hdr[i], alg));
+		if (want[i].kid) {
+			ck_assert_int_gt(asprintf(&kid, "\"kid\":\"%s\"",
+						  sn_kid[want[i].k]), 0);
+			ck_assert_ptr_nonnull(strstr(hdr[i], kid));
+		} else {
+			ck_assert_ptr_null(strstr(hdr[i], "\"kid\""));
+		}
+		free(hdr[i]);
+	}
+
+	for (k = 0; k < K_NUM; k++) {
+		jwt_checker_auto_t *c = jwt_checker_new();
+		int signs = 0;
+
+		ck_assert_int_eq(jwt_checker_setkey(c, sn_alg[k], keys[k]), 0);
+		for (i = 0; i < n; i++)
+			signs |= (want[i].k == k);
+
+		if (!signs) {
+			ck_assert_int_ne(jwt_checker_verify(c, tok), 0);
+			continue;
+		}
+
+		ck_assert_int_eq(jwt_checker_verify(c, tok), 0);
+		ck_assert_uint_eq(jwt_checker_sig_count(c), (unsigned int)n);
+		for (i = 0; i < n; i++)
+			ck_assert_int_eq(jwt_checker_sig_verified(c, i),
+					 want[i].k == k);
+	}
+}
+
+/* Builder steps. */
+enum { OP_END, OP_ADD, OP_SETKEY, OP_UNSET };
+
+struct sn_order {
+	struct { int op, k; } step[4];
+	struct sn_sig sig[SN_MAX];	/* the signers, in token order */
+	int n;
+	int promoted;			/* the calls select General */
+};
+
+START_TEST(test_setkey_node)
+{
+	static const struct sn_order orders[] = {
+		/* add_signature(A), setkey(B) */
+		{ { { OP_ADD, K_A }, { OP_SETKEY, K_B } },
+		  { { K_B, 0 }, { K_A, 1 } }, 2, 1 },
+		/* setkey(B), add_signature(A) */
+		{ { { OP_SETKEY, K_B }, { OP_ADD, K_A } },
+		  { { K_B, 0 }, { K_A, 1 } }, 2, 1 },
+		/* add_signature(A), add_signature(C), setkey(B) */
+		{ { { OP_ADD, K_A }, { OP_ADD, K_C }, { OP_SETKEY, K_B } },
+		  { { K_B, 0 }, { K_A, 1 }, { K_C, 1 } }, 3, 1 },
+		/* add_signature(A), setkey(JWT_ALG_NONE, NULL) */
+		{ { { OP_ADD, K_A }, { OP_UNSET, 0 } },
+		  { { K_A, 1 } }, 1, 0 },
+		/* setkey(B), add_signature(A), setkey(JWT_ALG_NONE, NULL) */
+		{ { { OP_SETKEY, K_B }, { OP_ADD, K_A }, { OP_UNSET, 0 } },
+		  { { K_A, 1 } }, 1, 1 },
+		/* setkey(B), setkey(JWT_ALG_NONE, NULL), add_signature(A) */
+		{ { { OP_SETKEY, K_B }, { OP_UNSET, 0 }, { OP_ADD, K_A } },
+		  { { K_A, 1 } }, 1, 0 },
+		/* add_signature(A), setkey(B), setkey(C): one setkey() node */
+		{ { { OP_ADD, K_A }, { OP_SETKEY, K_B }, { OP_SETKEY, K_C } },
+		  { { K_C, 0 }, { K_A, 1 } }, 2, 1 },
+		/* setkey(B), setkey(C) */
+		{ { { OP_SETKEY, K_B }, { OP_SETKEY, K_C } },
+		  { { K_C, 0 } }, 1, 0 },
+	};
+	jwk_set_t *sets[K_NUM];
+	const jwk_item_t *keys[K_NUM];
+	size_t o, f, when;
+	int k;
+
+	SET_OPS();
+
+	for (k = 0; k < K_NUM; k++) {
+		sets[k] = load_one(sn_file[k]);
+		keys[k] = jwks_item_get(sets[k], 0);
+	}
+
+	for (o = 0; o < ARRAY_SIZE(orders); o++)
+	for (f = 0; f < ARRAY_SIZE(all_fmt); f++)
+	for (when = 0; when < 2; when++) {
+		const struct sn_order *ord = &orders[o];
+		jwt_builder_auto_t *b = jwt_builder_new();
+		jwt_serialization_t eff = all_fmt[f];
+		char_auto *tok = NULL;
+		const char *err = NULL;
+		size_t s;
+
+		ck_assert_ptr_nonnull(b);
+
+		/* The format set before the signer calls: a second signer
+		 * promotes it to General. Set after them, it stands. */
+		if (when == 0) {
+			ck_assert_int_eq(jwt_builder_set_format(b, all_fmt[f]),
+					 0);
+			if (ord->promoted)
+				eff = JWT_FORMAT_JSON_GENERAL;
+		}
+
+		for (s = 0; s < ARRAY_SIZE(ord->step); s++) {
+			int sk = ord->step[s].k;
+			jwt_signature_t *sig;
+			char_auto *kid = NULL;
+
+			switch (ord->step[s].op) {
+			case OP_ADD:
+				sig = jwt_builder_add_signature(b, sn_alg[sk],
+								keys[sk]);
+				ck_assert_ptr_nonnull(sig);
+				ck_assert_int_gt(asprintf(&kid, "\"%s\"",
+							  sn_kid[sk]), 0);
+				ck_assert_int_eq(jwt_signature_add_protected_json(
+					sig, "kid", kid), 0);
+				break;
+			case OP_SETKEY:
+				ck_assert_int_eq(jwt_builder_setkey(b,
+					sn_alg[sk], keys[sk]), 0);
+				break;
+			case OP_UNSET:
+				ck_assert_int_eq(jwt_builder_setkey(b,
+					JWT_ALG_NONE, NULL), 0);
+				break;
+			default:
+				break;
+			}
+		}
+
+		if (when == 1)
+			ck_assert_int_eq(jwt_builder_set_format(b, all_fmt[f]),
+					 0);
+
+		if (eff == JWT_FORMAT_COMPACT && ord->n > 1)
+			err = "Compact serialization cannot carry multiple "
+				"signatures";
+		else if (eff == JWT_FORMAT_COMPACT && ord->sig[0].kid)
+			err = "Compact serialization cannot carry a "
+				"jwt_builder_add_signature() signer";
+		else if (eff == JWT_FORMAT_JSON_FLAT && ord->n > 1)
+			err = "Flattened serialization allows only one "
+				"signature";
+
+		tok = jwt_builder_generate(b);
+		if (err != NULL) {
+			/* Never an unsigned (or short-handed) token. */
+			ck_assert_ptr_null(tok);
+			ck_assert_str_eq(jwt_builder_error_msg(b), err);
+			continue;
+		}
+
+		sn_check(tok, eff, ord->sig, ord->n, keys);
+	}
+
+	for (k = 0; k < K_NUM; k++)
+		jwks_free(sets[k]);
+}
+END_TEST
+
+struct sn_cb_ctx {
+	const jwk_item_t *key;
+	jwt_alg_t alg;
+};
+
+/* A builder callback that picks the signing key and alg. */
+static int cb_sn_key(jwt_t *jwt, jwt_config_t *config)
+{
+	struct sn_cb_ctx *x = config->ctx;
+
+	(void)jwt;
+	config->key = x->key;
+	config->alg = x->alg;
+
+	return 0;
+}
+
+START_TEST(test_setkey_node_cb)
+{
+	jwk_set_t *sets[K_NUM];
+	const jwk_item_t *keys[K_NUM];
+	struct sn_cb_ctx pick[2], clear = { NULL, JWT_ALG_NONE };
+	const struct sn_sig only_a[] = { { K_A, 0 } };
+	const struct sn_sig a_c[] = { { K_A, 0 }, { K_C, 1 } };
+	const struct sn_sig only_c[] = { { K_C, 1 } };
+	size_t f, p;
+	int k, with_setkey;
+
+	SET_OPS();
+
+	for (k = 0; k < K_NUM; k++) {
+		sets[k] = load_one(sn_file[k]);
+		keys[k] = jwks_item_get(sets[k], 0);
+	}
+
+	/* The callback picks A, naming its alg or leaving it to the key. */
+	pick[0].key = keys[K_A];
+	pick[0].alg = JWT_ALG_ES256;
+	pick[1].key = keys[K_A];
+	pick[1].alg = JWT_ALG_NONE;
+
+	for (f = 0; f < ARRAY_SIZE(all_fmt); f++)
+	for (p = 0; p < ARRAY_SIZE(pick); p++)
+	for (with_setkey = 0; with_setkey < 2; with_setkey++) {
+		jwt_builder_auto_t *b = jwt_builder_new();
+		jwt_builder_auto_t *b2 = jwt_builder_new();
+		char_auto *tok = NULL, *tok2 = NULL;
+		jwt_signature_t *sig;
+
+		/* (1) The callback's key makes the one signature, also when
+		 * setkey(B) was called, and also when it was not. */
+		ck_assert_int_eq(jwt_builder_set_format(b, all_fmt[f]), 0);
+		if (with_setkey)
+			ck_assert_int_eq(jwt_builder_setkey(b, JWT_ALG_RS256,
+							    keys[K_B]), 0);
+		ck_assert_int_eq(jwt_builder_setcb(b, cb_sn_key, &pick[p]), 0);
+		tok = jwt_builder_generate(b);
+		sn_check(tok, all_fmt[f], only_a, 1, keys);
+
+		/* (2) Beside an add_signature(C) signer, the callback's key
+		 * still makes the setkey() signer's signature, first; C keeps
+		 * its own. Compact and Flattened carry one signature only. */
+		ck_assert_int_eq(jwt_builder_set_format(b2, all_fmt[f]), 0);
+		if (with_setkey)
+			ck_assert_int_eq(jwt_builder_setkey(b2, JWT_ALG_RS256,
+							    keys[K_B]), 0);
+		sig = jwt_builder_add_signature(b2, JWT_ALG_ES384, keys[K_C]);
+		ck_assert_ptr_nonnull(sig);
+		ck_assert_int_eq(jwt_signature_add_protected_json(sig, "kid",
+			"\"C\""), 0);
+		ck_assert_int_eq(jwt_builder_setcb(b2, cb_sn_key, &pick[p]),
+				 0);
+		if (with_setkey) {
+			/* setkey() first: two signers promoted it to General. */
+			ck_assert_int_eq(jwt_builder_set_format(b2,
+				all_fmt[f]), 0);
+		}
+		tok2 = jwt_builder_generate(b2);
+		switch (all_fmt[f]) {
+		case JWT_FORMAT_COMPACT:
+			ck_assert_ptr_null(tok2);
+			ck_assert_str_eq(jwt_builder_error_msg(b2), with_setkey ?
+				"Compact serialization cannot carry multiple "
+				"signatures" :
+				"Compact serialization cannot carry a "
+				"jwt_builder_add_signature() signer");
+			break;
+		case JWT_FORMAT_JSON_FLAT:
+			ck_assert_ptr_null(tok2);
+			ck_assert_str_eq(jwt_builder_error_msg(b2),
+				"Flattened serialization allows only one "
+				"signature");
+			break;
+		default:
+			sn_check(tok2, all_fmt[f], a_c, 2, keys);
+			break;
+		}
+	}
+
+	/* (3) A callback that takes the key away: the setkey() signer can't
+	 * go out as "none" in a JSON form, but with no setkey() signer only
+	 * the add_signature() ones are left to sign. */
+	for (f = 1; f < ARRAY_SIZE(all_fmt); f++) {
+		jwt_builder_auto_t *b = jwt_builder_new();
+		jwt_builder_auto_t *b2 = jwt_builder_new();
+		char_auto *tok = NULL;
+		jwt_signature_t *sig;
+
+		ck_assert_int_eq(jwt_builder_set_format(b, all_fmt[f]), 0);
+		ck_assert_int_eq(jwt_builder_setkey(b, JWT_ALG_RS256,
+						    keys[K_B]), 0);
+		ck_assert_int_eq(jwt_builder_setcb(b, cb_sn_key, &clear), 0);
+		ck_assert_ptr_null(jwt_builder_generate(b));
+		ck_assert_str_eq(jwt_builder_error_msg(b),
+			"A JSON-serialized JWS cannot use \"none\"");
+
+		ck_assert_int_eq(jwt_builder_set_format(b2, all_fmt[f]), 0);
+		sig = jwt_builder_add_signature(b2, JWT_ALG_ES384, keys[K_C]);
+		ck_assert_ptr_nonnull(sig);
+		ck_assert_int_eq(jwt_signature_add_protected_json(sig, "kid",
+			"\"C\""), 0);
+		ck_assert_int_eq(jwt_builder_setcb(b2, cb_sn_key, &clear), 0);
+		tok = jwt_builder_generate(b2);
+		sn_check(tok, all_fmt[f], only_c, 1, keys);
+	}
+
+	for (k = 0; k < K_NUM; k++)
+		jwks_free(sets[k]);
+}
+END_TEST
+
 static Suite *libjwt_suite(const char *title)
 {
 	Suite *s;
-	TCase *tc_core;
+	TCase *tc_core, *tc_scale;
 	int i = ARRAY_SIZE(jwt_test_ops);
 
 	s = suite_create(title);
@@ -1875,14 +2841,26 @@ static Suite *libjwt_suite(const char *title)
 	tcase_add_loop_test(tc_core, test_compact_keyring_b64, 0, i);
 	tcase_add_loop_test(tc_core, test_compact_keyring_reuse, 0, i);
 	tcase_add_loop_test(tc_core, test_compact_keyring_embedded, 0, i);
+	tcase_add_loop_test(tc_core, test_compact_keyring_candidates, 0, i);
+	tcase_add_loop_test(tc_core, test_compact_keyring_alloc, 0, i);
 	tcase_add_loop_test(tc_core, test_json_alg_pin, 0, i);
 	tcase_add_loop_test(tc_core, test_json_alg_none_cb, 0, i);
 	tcase_add_loop_test(tc_core, test_keyring_kid_type, 0, i);
 	tcase_add_loop_test(tc_core, test_keyring_key_use, 0, i);
+	tcase_add_loop_test(tc_core, test_msg_unify, 0, i);
+	tcase_add_loop_test(tc_core, test_setkey_node, 0, i);
+	tcase_add_loop_test(tc_core, test_setkey_node_cb, 0, i);
 
 	tcase_set_timeout(tc_core, 60);
 
 	suite_add_tcase(s, tc_core);
+
+	/* Its own case, with room for the 10,000-key ring under valgrind. The
+	 * timeout only keeps memcheck from timing out: it is no speed check. */
+	tc_scale = tcase_create("jws_json_scale");
+	tcase_add_loop_test(tc_scale, test_keyring_scan_large, 0, i);
+	tcase_set_timeout(tc_scale, 300);
+	suite_add_tcase(s, tc_scale);
 
 	return s;
 }

@@ -18,6 +18,22 @@ refute_sanitizer() {
 	return 0
 }
 
+# Issue #367: every key fixture must be found wherever the build directory
+# sits, so key paths resolve through ${SRCDIR} (exported by ctest), never a
+# build-dir-relative path that only works when the build directory is a direct
+# child of the source root. A depth-1 CI build (which always runs "make all"
+# first) would not catch a regression back to the latter, so pin it here: no
+# top-level key variable may be assigned such a path. The grep is anchored to
+# an assignment at column 0, so this test's own indented grep line and the
+# comment lines above it do not match themselves.
+@test "key fixtures resolve through \$SRCDIR, not a build-relative path (#367)" {
+	[ -n "${SRCDIR}" ]
+	[ -d "${SRCDIR}/tests/keys" ]
+	run grep -nE '^[A-Za-z_][A-Za-z_0-9]*=.*\.\./tests/keys' \
+		"${BATS_TEST_DIRNAME}/jwt-cli.bats"
+	[ "${status}" -ne 0 ]
+}
+
 @test "Generate a JWT with alg none" {
 	result="$(./tools/jwt-generate -v -a none -n)"
 	[ "$result" = ${BASIC_RES} ]
@@ -37,7 +53,7 @@ refute_sanitizer() {
 }
 
 HS256_RES="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.CM4dD95Nj0vSfMGtDas432AUW1HAo7feCiAbt5Yjuds"
-HS256_KEY="../tests/keys/oct_key_256.json"
+HS256_KEY="${SRCDIR}/tests/keys/oct_key_256.json"
 
 @test "Generate a JWT with alg HS256" {
 	result="$(./tools/jwt-generate -v -a HS256 -n -k ${HS256_KEY})"
@@ -76,7 +92,7 @@ CLAIM_RES="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJhZG1pbiI6ZmFsc2UsImV4cCI6MTgz
 }
 
 # A key without an "alg" needs -a/--algorithm, and both spellings must work.
-NOALG_KEY="../tests/keys/oct_key_256_sig.json"
+NOALG_KEY="${SRCDIR}/tests/keys/oct_key_256_sig.json"
 
 @test "Verify with -a ALG as well as --algorithm=ALG" {
 	token="$(./tools/jwt-generate -q -n -a HS256 -k ${NOALG_KEY})"
@@ -89,7 +105,19 @@ NOALG_KEY="../tests/keys/oct_key_256_sig.json"
 	# ...and an unknown one is reported by name.
 	run ./tools/jwt-verify -a BOGUS -k ${NOALG_KEY} "${token}"
 	[ "${status}" -ne 0 ]
-	echo "${output}" | grep -q 'Unknown algorithm \[BOGUS\]'
+	echo "${output}" | grep -qx 'Unknown algorithm \[BOGUS\]'
+	echo "${output}" | grep -qx 'Use -l to see a list of supported algorithms'
+}
+
+@test "jwt-generate reports an unknown algorithm with one blank line" {
+	run ./tools/jwt-generate -a BOGUS
+	[ "${status}" -ne 0 ]
+	echo "${output}" | grep -qx \
+		'ERROR: Unknown algorithm (use -l to see a list of supported algorithms)'
+	# Exactly one blank line between the error and the usage text.
+	after="$(echo "${output}" | grep -A2 '^ERROR: Unknown algorithm')"
+	[ "$(echo "${after}" | sed -n 2p)" = "" ]
+	[ "$(echo "${after}" | sed -n 3p | cut -c1-6)" = "Usage:" ]
 }
 
 @test "Generate JWKS from PEM Files" {
@@ -209,14 +237,133 @@ EOF
 
 # JWE tools
 
-OCT256="../tests/keys/oct_dir_256.json"
-OCT256B="../tests/keys/oct_key_256_enc.json"
-RSAENC="../tests/keys/rsa_key_2048_enc.json"
+OCT256="${SRCDIR}/tests/keys/oct_dir_256.json"
+OCT256B="${SRCDIR}/tests/keys/oct_key_256_enc.json"
+RSAENC="${SRCDIR}/tests/keys/rsa_key_2048_enc.json"
 
 @test "JWE dir + A256GCM round-trip" {
 	tok="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -j '{"a":1}')"
 	result="$(echo "${tok}" | ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM)"
 	[ "${result}" = '{"a":1}' ]
+}
+
+# Issue #375: jwe-decrypt reads the one token correctly. stdin is read whole,
+# never truncated at a NUL byte and never with its lines joined; a Compact
+# token is one line (a second token or a token split over lines is an error),
+# while a JSON token may span lines. Exactly one token argument is accepted.
+# Modeled on the jwt-verify stdin cases above.
+@test "jwe-decrypt stdin rejects a NUL byte and decrypts nothing" {
+	tok="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -j '{"a":1}')"
+	tok2="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -j '{"b":2}')"
+	# A token, a NUL byte, then junk used to decrypt the token with exit 0.
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM \
+		< <(printf '%s\0junk\n' "${tok}")
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q 'NUL byte'
+	[ "$(echo "${output}" | grep -c '{"a":1}')" -eq 0 ]
+	refute_sanitizer
+	# A NUL byte then a whole second token: the token in front is not used.
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM \
+		< <(printf '%s\0%s\n' "${tok}" "${tok2}")
+	[ "${status}" -eq 1 ]
+	[ "$(echo "${output}" | grep -c '{"a":1}')" -eq 0 ]
+	# A NUL byte inside the token, and as the very first byte, both error.
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM \
+		< <(printf '%s\0%s\n' "${tok:0:20}" "${tok:20}")
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q 'NUL byte'
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM \
+		< <(printf '\0%s\n' "${tok}")
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q 'NUL byte'
+	refute_sanitizer
+}
+
+@test "jwe-decrypt stdin rejects an over-long token (distinct from NUL)" {
+	# More than MAX_TOKEN_LEN (1 MiB) of input, no NUL: read_stdin_token()
+	# returns -4 and the tool says it is too long, not a NUL-byte error.
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM \
+		< <(head -c 1100000 /dev/zero | tr '\000' 'a')
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q 'too long'
+	[ "$(echo "${output}" | grep -c 'NUL byte')" -eq 0 ]
+	refute_sanitizer
+}
+
+@test "jwe-decrypt stdin rejects a second token or a split Compact token" {
+	tok="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -j '{"a":1}')"
+	tok2="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -j '{"b":2}')"
+	# Two Compact tokens on two lines used to be joined into one bad token.
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM \
+		< <(printf '%s\n%s\n' "${tok}" "${tok2}")
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q 'more than one token'
+	refute_sanitizer
+	# A Compact token split over two lines used to be rejoined and decrypt.
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM \
+		< <(printf '%s\n%s\n' "${tok:0:30}" "${tok:30}")
+	[ "${status}" -eq 1 ]
+	[ "$(echo "${output}" | grep -c '{"a":1}')" -eq 0 ]
+	refute_sanitizer
+}
+
+@test "jwe-decrypt stdin decrypts with or without a trailing newline" {
+	tok="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -j '{"a":1}')"
+	result="$(printf '%s\n' "${tok}" | \
+		./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM)"
+	[ "${result}" = '{"a":1}' ]
+	result="$(printf '%s' "${tok}" | \
+		./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM)"
+	[ "${result}" = '{"a":1}' ]
+	# A trailing CRLF is a line end too and is dropped.
+	result="$(printf '%s\r\n' "${tok}" | \
+		./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM)"
+	[ "${result}" = '{"a":1}' ]
+}
+
+@test "jwe-decrypt stdin accepts a pretty-printed JSON token" {
+	# jq . reformats the JSON serialization across several lines; both the
+	# Flattened and General forms must still decrypt from stdin.
+	ftok="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM \
+		-f json-flat -j '{"j":1}')"
+	gtok="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM \
+		-f json-general -j '{"g":2}')"
+	result="$(jq . <<< "${ftok}" | \
+		./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM)"
+	[ "${result}" = '{"j":1}' ]
+	result="$(jq . <<< "${gtok}" | \
+		./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM)"
+	[ "${result}" = '{"g":2}' ]
+}
+
+@test "jwe-decrypt accepts only one token argument" {
+	tok="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -j '{"a":1}')"
+	tok2="$(./tools/jwe-encrypt -k ${OCT256} -a dir -e A256GCM -j '{"b":2}')"
+	# A second argument used to be silently ignored, with exit 0.
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM "${tok}" "${tok2}"
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q 'Only one token argument'
+	[ "$(echo "${output}" | grep -c '{"a":1}')" -eq 0 ]
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM "${tok}" junk
+	[ "${status}" -eq 1 ]
+	[ "$(echo "${output}" | grep -c '{"a":1}')" -eq 0 ]
+	refute_sanitizer
+	# One argument still decrypts.
+	result="$(./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM "${tok}")"
+	[ "${result}" = '{"a":1}' ]
+}
+
+@test "jwe-decrypt tells empty stdin from a read error" {
+	# Empty stdin and a read error both exit 1, with distinct messages.
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM < /dev/null
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q 'No token read from stdin'
+	refute_sanitizer
+	# A directory cannot be read: the errno is reported, not taken for empty.
+	run ./tools/jwe-decrypt -k ${OCT256} -a dir -e A256GCM < .
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q 'Could not read stdin'
+	refute_sanitizer
 }
 
 @test "JWE A256KW + A256CBC-HS512 round-trip" {
@@ -238,7 +385,7 @@ RSAENC="../tests/keys/rsa_key_2048_enc.json"
 }
 
 # The same key as OCT256B, flagged in error when loaded (a malformed "x5c").
-OCT256B_ERR="../tests/keys/oct_key_256_enc_bad_x5c.json"
+OCT256B_ERR="${SRCDIR}/tests/keys/oct_key_256_enc_bad_x5c.json"
 
 @test "JWE tools refuse a key in error" {
 	run ./tools/jwe-encrypt -k ${OCT256B_ERR} -a A256KW -e A256GCM -j '{}'
@@ -256,7 +403,7 @@ OCT256B_ERR="../tests/keys/oct_key_256_enc_bad_x5c.json"
 	[ "${status}" -ne 0 ]
 }
 
-ECENC="../tests/keys/ec_key_prime256v1_enc.json"
+ECENC="${SRCDIR}/tests/keys/ec_key_prime256v1_enc.json"
 
 @test "JWE Flattened JSON round-trip (auto-detect on decrypt)" {
 	tok="$(./tools/jwe-encrypt -k ${OCT256B} -a A256KW -e A256GCM \
@@ -402,6 +549,27 @@ ECENC="../tests/keys/ec_key_prime256v1_enc.json"
 	refute_sanitizer
 }
 
+# issue #354: a keyring (-r) verify failure surfaces the SAME specific
+# per-signature reason the single-key path (-k) gives, not just the generic
+# "Signature policy not met" count. Here the ring holds a different HS256
+# secret, so the HMAC does not match.
+WRONG_KEY="${SRCDIR}/tests/keys/oct_key_256_issue1.json"
+
+@test "jwt-verify keyring failure reports the specific reason (#354)" {
+	token="$(./tools/jwt-generate -q -n -k ${HS256_KEY})"
+	# The single-key path already named the reason...
+	run ./tools/jwt-verify -k ${WRONG_KEY} "${token}"
+	[ "${status}" -ne 0 ]
+	echo "${output}" | grep -q "Token failed verification"
+	refute_sanitizer
+	# ...and now the keyring path names the same reason, not the count.
+	run ./tools/jwt-verify -r ${WRONG_KEY} "${token}"
+	[ "${status}" -ne 0 ]
+	echo "${output}" | grep -q "Token failed verification"
+	! echo "${output}" | grep -q "Signature policy not met"
+	refute_sanitizer
+}
+
 # #364: jwt-generate allocates its builder only after option parsing and routes
 # every error through a single cleanup label, so these error exits are leak-free
 # under LeakSanitizer.
@@ -489,6 +657,244 @@ ECENC="../tests/keys/ec_key_prime256v1_enc.json"
 	[ "${have_out}" -eq 1 ]
 }
 
+# --- jwk2key exit status and error reporting (#374) ----------------------
+#
+# jwk2key used to exit 0 even when nothing was written: a bad input file, a key
+# that did not load, a skipped key, a missing/unwritable output directory, an
+# existing output file or a failed write all passed silently. It now exits 1
+# and names each key it could not write, and never passes a NULL PEM to
+# fputs() (which crashes on glibc). Each case works in its own ${BATS_TMPDIR}
+# directory with keys from ${SRCDIR}/tests/keys (#367).
+
+@test "jwk2key exits 1 on a missing input file" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_miss_$$"
+	mkdir -p "${dir}"
+	run ./tools/jwk2key -d "${dir}" "${dir}/nosuch.json"
+	nfiles=$(ls "${dir}" | wc -l)
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q "Error reading"
+	[ "${nfiles}" -eq 0 ]
+	refute_sanitizer
+}
+
+@test "jwk2key exits 1 on an input that is not JSON" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_njson_$$"
+	mkdir -p "${dir}"
+	printf 'not json\n' > "${dir}/notjson.json"
+	run ./tools/jwk2key -d "${dir}" "${dir}/notjson.json"
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q "Error reading"
+	refute_sanitizer
+}
+
+@test "jwk2key exits 1 when every key is bad and names each one" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_bad_$$"
+	mkdir -p "${dir}"
+	run ./tools/jwk2key -d "${dir}" ${SRCDIR}/tests/keys/bad_keys.json
+	nfiles=$(ls "${dir}" | wc -l)
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	[ "${nfiles}" -eq 0 ]
+	# bad_keys.json holds 14 keys; every one is reported.
+	[ "$(echo "${output}" | grep -c 'key [0-9]')" -eq 14 ]
+	refute_sanitizer
+}
+
+@test "jwk2key writes the good key, reports the bad one, exits 1" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_mix_$$"
+	mkdir -p "${dir}"
+	# One good RSA key and one EC key that cannot load (bogus x/y).
+	jq -c '{keys: [., {kty:"EC",crv:"P-256",x:"AA",y:"AA"}]}' \
+		${SRCDIR}/tests/keys/rsa_key_1024.json > "${dir}/mixed.json"
+	run ./tools/jwk2key -d "${dir}" "${dir}/mixed.json"
+	have_good=0
+	ls "${dir}"/rsa_1024_*.pem >/dev/null 2>&1 && have_good=1
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	[ "${have_good}" -eq 1 ]
+	# The second key (index 1) is the one reported.
+	echo "${output}" | grep -q "key 1"
+	refute_sanitizer
+}
+
+@test "jwk2key exits 1 on a key set with no keys" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_empty_$$"
+	mkdir -p "${dir}"
+	echo '{"keys":[]}' > "${dir}/empty.json"
+	run ./tools/jwk2key -d "${dir}" "${dir}/empty.json"
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q "No keys found"
+	refute_sanitizer
+}
+
+@test "jwk2key exits 1 on a missing output directory" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_nodir_$$"
+	rm -rf "${dir}"
+	run ./tools/jwk2key -d "${dir}" ${SRCDIR}/tests/keys/rsa_key_1024.json
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q "not an existing writable directory"
+	refute_sanitizer
+}
+
+@test "jwk2key exits 1 on an output path that is not a directory" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_notdir_$$"
+	mkdir -p "${dir}"
+	# A regular file is not a writable directory, so -d must reject it.
+	printf '' > "${dir}/afile"
+	run ./tools/jwk2key -d "${dir}/afile" ${SRCDIR}/tests/keys/rsa_key_1024.json
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q "not an existing writable directory"
+	refute_sanitizer
+}
+
+@test "jwk2key exits 1 on a read-only output directory" {
+	[ "$(id -u)" -ne 0 ] || skip "root can write to a read-only directory"
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_ro_$$"
+	mkdir -p "${dir}"
+	chmod 555 "${dir}"
+	run ./tools/jwk2key -d "${dir}" ${SRCDIR}/tests/keys/rsa_key_1024.json
+	chmod 755 "${dir}"
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q "not an existing writable directory"
+	refute_sanitizer
+}
+
+@test "jwk2key exits 1 when the output file already exists" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_exists_$$"
+	mkdir -p "${dir}"
+	./tools/jwk2key -d "${dir}" ${SRCDIR}/tests/keys/rsa_key_1024.json
+	run ./tools/jwk2key -d "${dir}" ${SRCDIR}/tests/keys/rsa_key_1024.json
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q "cannot create"
+	refute_sanitizer
+}
+
+@test "jwk2key exits 1 and writes nothing for an unsafe kid" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_unsafe_$$"
+	mkdir -p "${dir}"
+	printf '{"kty":"oct","kid":"../x","k":"%s"}' \
+		"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" > "${dir}/unsafe.json"
+	run ./tools/jwk2key -d "${dir}" "${dir}/unsafe.json"
+	# Only the input file is left; no key file escaped the directory.
+	nfiles=$(ls "${dir}" | wc -l)
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	echo "${output}" | grep -q "unsafe key id"
+	[ "${nfiles}" -eq 1 ]
+	refute_sanitizer
+}
+
+@test "jwk2key reports only the failed file and still writes the good one" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_isolate_$$"
+	mkdir -p "${dir}"
+	run ./tools/jwk2key -d "${dir}" "${dir}/nosuch.json" \
+		${SRCDIR}/tests/keys/rsa_key_1024.json
+	have_good=0
+	ls "${dir}"/rsa_1024_*.pem >/dev/null 2>&1 && have_good=1
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	[ "${have_good}" -eq 1 ]
+	# The good file's load is not reported with the missing file's error:
+	# exactly one "Error reading" line.
+	[ "$(echo "${output}" | grep -c 'Error reading')" -eq 1 ]
+	refute_sanitizer
+}
+
+@test "jwk2key exits 1 on a failed write and leaves no file behind" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_wfail_$$"
+	mkdir -p "${dir}"
+	# RLIMIT_FSIZE 0 with SIGXFSZ ignored makes the write fail; bats captures
+	# output through a pipe, so only the key file (not the test) is limited.
+	run bash -c "trap '' XFSZ; ulimit -f 0; \
+		./tools/jwk2key -d '${dir}' ${SRCDIR}/tests/keys/rsa_key_1024.json"
+	nfiles=$(ls "${dir}" | wc -l)
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	[ "${nfiles}" -eq 0 ]
+	refute_sanitizer
+}
+
+@test "jwk2key reads a JWK from stdin with -" {
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_stdin_$$"
+	mkdir -p "${dir}"
+	run bash -c "./tools/jwk2key -d '${dir}' - \
+		< ${SRCDIR}/tests/keys/oct_key_384.json"
+	have=0
+	ls "${dir}"/oct_384_*.bin >/dev/null 2>&1 && have=1
+	rm -rf "${dir}"
+	[ "${status}" -eq 0 ]
+	[ "${have}" -eq 1 ]
+	refute_sanitizer
+}
+
+# The existing "Convert JWK to PEM" cases above must still exit 0; add an AKP
+# (ML-DSA) conversion when the default backend can export it, so every key-type
+# branch of jwk2key is exercised.
+@test "jwk2key converts an ML-DSA key and exits 0" {
+	mldsa_supported || skip "ML-DSA not built in"
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_akp_$$"
+	mkdir -p "${dir}"
+	run ./tools/jwk2key -d "${dir}" ${SRCDIR}/tests/keys/mldsa_key_44.json
+	have_out=0
+	ls "${dir}"/mldsa_44_*.pem >/dev/null 2>&1 && have_out=1
+	rm -rf "${dir}"
+	[ "${status}" -eq 0 ]
+	[ "${have_out}" -eq 1 ]
+	refute_sanitizer
+}
+
+# With JWT_CRYPTO=mbedtls the OKP/ML-DSA export paths differ: MbedTLS has no PEM
+# for an Ed25519 key (a NULL that once reached fputs() and crashed on glibc),
+# and it cannot load an ML-DSA key at all. Both must exit 1, not crash, and
+# leave no file. Skipped when MbedTLS is not compiled in (it falls back and
+# prints "No such crypto ops").
+@test "jwk2key under MbedTLS: Ed25519 exits 1 without crashing or a file" {
+	env JWT_CRYPTO=mbedtls ./tools/jwk2key -h >/dev/null 2>/tmp/jwk2key_mb_$$ \
+		|| true
+	if grep -q "No such crypto ops" "/tmp/jwk2key_mb_$$"; then
+		rm -f "/tmp/jwk2key_mb_$$"
+		skip "MbedTLS backend not built in"
+	fi
+	rm -f "/tmp/jwk2key_mb_$$"
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_mbed_$$"
+	mkdir -p "${dir}"
+	run env JWT_CRYPTO=mbedtls ./tools/jwk2key -d "${dir}" \
+		${SRCDIR}/tests/keys/eddsa_key_ed25519.json
+	nfiles=$(ls "${dir}" | wc -l)
+	rm -rf "${dir}"
+	# Exit 1 (not 0 as on macOS, not a SIGSEGV 139 as on glibc), no file.
+	[ "${status}" -eq 1 ]
+	[ "${nfiles}" -eq 0 ]
+	echo "${output}" | grep -q "no PEM available"
+	refute_sanitizer
+}
+
+@test "jwk2key under MbedTLS: an ML-DSA key exits 1 with its error" {
+	env JWT_CRYPTO=mbedtls ./tools/jwk2key -h >/dev/null 2>/tmp/jwk2key_mb2_$$ \
+		|| true
+	if grep -q "No such crypto ops" "/tmp/jwk2key_mb2_$$"; then
+		rm -f "/tmp/jwk2key_mb2_$$"
+		skip "MbedTLS backend not built in"
+	fi
+	rm -f "/tmp/jwk2key_mb2_$$"
+	dir="${BATS_TMPDIR:-/tmp}/jwk2key_mbed2_$$"
+	mkdir -p "${dir}"
+	run env JWT_CRYPTO=mbedtls ./tools/jwk2key -d "${dir}" \
+		${SRCDIR}/tests/keys/mldsa_key_44.json
+	nfiles=$(ls "${dir}" | wc -l)
+	rm -rf "${dir}"
+	[ "${status}" -eq 1 ]
+	[ "${nfiles}" -eq 0 ]
+	echo "${output}" | grep -q "key 0"
+	refute_sanitizer
+}
+
 # --- ML-DSA (FIPS 204 / RFC 9964) ----------------------------------------
 #
 # These only run when the library was built with WITH_ML_DSA against a capable
@@ -530,9 +936,9 @@ mldsa_supported() {
 }
 
 # JWS JSON Serialization (multi-signature, RFC 7515 7.2) — issue #308
-EC_KEY="../tests/keys/ec_key_prime256v1.json"
-RS_KEY="../tests/keys/rsa_key_2048.json"
-JWS_RING="../tests/keys/jwks_jws_pair.json"
+EC_KEY="${SRCDIR}/tests/keys/ec_key_prime256v1.json"
+RS_KEY="${SRCDIR}/tests/keys/rsa_key_2048.json"
+JWS_RING="${SRCDIR}/tests/keys/jwks_jws_pair.json"
 
 @test "Generate a Flattened JWS and verify it" {
 	token="$(./tools/jwt-generate -q -n -F flat -k ${EC_KEY})"
@@ -607,7 +1013,7 @@ JWS_RING="../tests/keys/jwks_jws_pair.json"
 # GHSA-mhc9-xvg5-qg29: --keyring verifies a Compact token as a one-signature
 # JWS (kid binding or a scan of the compatible keys), never as a keyless
 # checker that accepts an unsigned token.
-KEYRING="../tests/keys/jwks_keyring.json"
+KEYRING="${SRCDIR}/tests/keys/jwks_keyring.json"
 # {"alg":"none"} . {"sub":"admin","iss":"trusted","aud":"api"} . (unsigned)
 NONE_TOK="eyJhbGciOiJub25lIn0.eyJzdWIiOiJhZG1pbiIsImlzcyI6InRydXN0ZWQiLCJhdWQiOiJhcGkifQ."
 
@@ -773,15 +1179,52 @@ FORGED_TOK="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiJ9.AAAA"
 	[ "$(echo "${output}" | grep -c 'Verified')" -eq 1 ]
 }
 
-# GHSA-g7xw-4cjw-2247: -h/-l print and exit 0 only as the sole argument. In a
-# token position (getopt permutes argv) they once exited 0 while the tokens
-# went unverified. Given with anything else they are now a usage error.
+# #373: read_line() looks at every byte of a line (so a NUL byte or an
+# over-long line fails the whole line), which is why it reads a byte at a
+# time. The reader was changed from an fgetc() loop to getc_unlocked() under
+# one flockfile()/funlockfile() per line -- the per-byte stream lock is most
+# of the run time on bulk input on macOS -- and must stay byte-for-byte the
+# same. Read a bulk stream of a few thousand lines that crosses the stdio
+# buffer many times and mixes valid tokens, an over-long line, a NUL-byte line
+# and a final line with no newline: each line is still scored as one token on
+# its own. A reader that split a long line or stopped at a NUL byte (the pre-
+# fix fgets() behaviour) would miscount these.
+@test "Bulk stdin is read one token per line, unchanged (#373)" {
+	run ./tools/jwt-verify -k ${HS256_KEY} - < <(
+		for _ in $(seq 1 1000); do printf '%s\n' ${HS256_RES}; done
+		printf '%0*d\n' 1048576 0                    # over-long: 1 failed token
+		printf '%s\0%s\n' ${HS256_RES} ${HS256_RES}  # NUL byte: 1 failed token
+		for _ in $(seq 1 1000); do printf '%s\n' ${HS256_RES}; done
+		printf '%s' ${HS256_RES})                    # last line needs no newline
+	[ "${status}" -eq 1 ]
+	# 2000 full lines + 1 final line with no newline, each verified once.
+	[ "$(echo "${output}" | grep -c 'Verified')" -eq 2001 ]
+	[ "$(echo "${output}" | grep -c '\[TOK\]')" -eq 2001 ]
+	# The over-long line and the NUL-byte line, each one failed token, nothing
+	# verified from either.
+	[ "$(echo "${output}" | grep -c 'Line is too long or has a NUL byte')" -eq 2 ]
+}
+
+# GHSA-g7xw-4cjw-2247: -h/-l print and exit 0 only as the sole argument and the
+# only option in it. In a token position (getopt permutes argv) they once exited
+# 0 while the tokens went unverified; clustered with another option into the one
+# argument (getopt reads -hv as -h -v) they likewise exited 0. Given with
+# anything else -- a token, a key, or another option, whether separate (-h -v)
+# or clustered (-hv) -- they are a usage error.
 @test "-h or -l alone exits 0, but with other arguments it is an error" {
 	run ./tools/jwt-verify -h
 	[ "${status}" -eq 0 ]
 	run ./tools/jwt-verify -l
 	[ "${status}" -eq 0 ]
 	echo "${output}" | grep -q 'Algorithms supported'
+	# The long forms, and a unique prefix, are also fine as the sole option.
+	run ./tools/jwt-verify --help
+	[ "${status}" -eq 0 ]
+	run ./tools/jwt-verify --list
+	[ "${status}" -eq 0 ]
+	echo "${output}" | grep -q 'Algorithms supported'
+	run ./tools/jwt-verify --he
+	[ "${status}" -eq 0 ]
 	# As the token argument, next to a key.
 	run ./tools/jwt-verify -q -k ${HS256_KEY} -h
 	[ "${status}" -eq 1 ]
@@ -795,6 +1238,14 @@ FORGED_TOK="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiJ9.AAAA"
 	# A forged token spelled as an option (-l<forged>) is not a listing.
 	run ./tools/jwt-verify -q -k ${HS256_KEY} "-l${FORGED_TOK}"
 	[ "${status}" -eq 1 ]
+	# Clustered into the one argument: -h/-l must be the only option in it, so
+	# these are the same usage error as -h -v (exit 1), not a help/list at
+	# exit 0. -hk<file> and -hr<file> never open the file.
+	for opt in -hv -vh -lq -ql "-hk${HS256_KEY}" -laHS256 -hl; do
+		run ./tools/jwt-verify "${opt}"
+		[ "${status}" -eq 1 ]
+		echo "${output}" | grep -q 'take no other arguments'
+	done
 }
 
 # GHSA-g7xw-4cjw-2247: a key set with no keys (as after a rotation) must exit 1,
@@ -814,22 +1265,61 @@ FORGED_TOK="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZG1pbiJ9.AAAA"
 
 # The --print command is a validator: a token passes only if the command runs
 # to its end and exits 0. One that a signal ends has no exit status, which
-# read as 0. Each command reads its input first, so that the tool never
-# writes to a pipe nobody reads.
+# read as 0. Since issue #371 the command need not read its input first: the
+# tool ignores SIGPIPE while writing, so a command that stops reading is not
+# killed off, and its exit status alone decides.
 @test "A --print command that fails or is killed fails the token" {
-	run ./tools/jwt-verify -v -p 'cat > /dev/null' -k ${HS256_KEY} \
-		${HS256_RES}
+	run ./tools/jwt-verify -v -p true -k ${HS256_KEY} ${HS256_RES}
 	[ "${status}" -eq 0 ]
-	run ./tools/jwt-verify -v -p 'cat > /dev/null; exit 3' \
-		-k ${HS256_KEY} ${HS256_RES}
+	run ./tools/jwt-verify -v -p 'exit 3' -k ${HS256_KEY} ${HS256_RES}
 	[ "${status}" -eq 1 ]
-	run ./tools/jwt-verify -v -p 'cat > /dev/null; kill -9 $$' \
-		-k ${HS256_KEY} ${HS256_RES}
+	run ./tools/jwt-verify -v -p 'kill -9 $$' -k ${HS256_KEY} ${HS256_RES}
 	[ "${status}" -eq 1 ]
 	[ "$(echo "${output}" | grep -c 'Verified')" -eq 0 ]
-	run ./tools/jwt-generate -v -p 'cat > /dev/null; kill -9 $$' \
-		-a HS256 -k ${HS256_KEY}
+	run ./tools/jwt-generate -v -p 'kill -9 $$' -a HS256 -k ${HS256_KEY}
 	[ "${status}" -ne 0 ]
+}
+
+# Issue #371: the JSON is written to the --print command through a pipe, once
+# for the header and once for the payload. A payload larger than the pipe
+# buffer blocks in write() until the command reads it, and a command that
+# stops reading first (true, false, head -c) once killed the tool with SIGPIPE
+# (exit 141) in mid-run: the tokens after the big one were never processed and
+# buffered output was lost. The tool now ignores SIGPIPE while writing, so a
+# stopped reader no longer ends it and the command's exit status decides at any
+# size, exactly as for a token that fits the buffer. The 70000-byte claim makes
+# the payload exceed the 64 KiB pipe buffer; a good token sits before and after
+# the big one to prove the run is not cut short.
+BIG_CLAIM="s:pad=$(printf '%070000d' 0)"
+
+@test "A --print command surviving a payload larger than the pipe buffer (#371)" {
+	big="$(./tools/jwt-generate -q -n -k ${HS256_KEY} -c "${BIG_CLAIM}")"
+	[ "$(printf '%s' "${big}" | wc -c)" -gt 65536 ]
+	# -p true reads nothing and exits 0: all three tokens pass, none lost.
+	run ./tools/jwt-verify -v -p true -k ${HS256_KEY} \
+		${HS256_RES} "${big}" ${HS256_RES}
+	[ "${status}" -eq 0 ]
+	[ "$(echo "${output}" | grep -c 'Verified')" -eq 3 ]
+	# -p false reads nothing and exits 1: every token fails, with a [BAD].
+	run ./tools/jwt-verify -v -p false -k ${HS256_KEY} \
+		${HS256_RES} "${big}" ${HS256_RES}
+	[ "${status}" -eq 1 ]
+	[ "$(echo "${output}" | grep -c '\[BAD\]')" -eq 3 ]
+	# The same through stdin, one token per line.
+	run bash -c "printf '%s\n' ${HS256_RES} '${big}' ${HS256_RES} | \
+		./tools/jwt-verify -v -p true -k ${HS256_KEY} -"
+	[ "${status}" -eq 0 ]
+	[ "$(echo "${output}" | grep -c 'Verified')" -eq 3 ]
+	run bash -c "printf '%s\n' ${HS256_RES} '${big}' ${HS256_RES} | \
+		./tools/jwt-verify -v -p false -k ${HS256_KEY} -"
+	[ "${status}" -eq 1 ]
+	[ "$(echo "${output}" | grep -c '\[BAD\]')" -eq 3 ]
+	# jwt-generate shares write_json(): -p true passes, -p false fails.
+	run ./tools/jwt-generate -v -p true -n -k ${HS256_KEY} -c "${BIG_CLAIM}"
+	[ "${status}" -eq 0 ]
+	run ./tools/jwt-generate -v -p false -n -k ${HS256_KEY} -c "${BIG_CLAIM}"
+	[ "${status}" -eq 1 ]
+	refute_sanitizer
 }
 
 # GHSA-g7xw-4cjw-2247: --print runs its validator only with --verbose. Without

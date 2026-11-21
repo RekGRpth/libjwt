@@ -96,8 +96,11 @@ form with one or more signatures.
 Select the form with `jwt_builder_set_format()`; add extra signers (each with
 its own algorithm and per-signature protected/unprotected header) with
 `jwt_builder_add_signature()`. The same payload is signed independently by each
-signer, so signatures may use different algorithms (e.g. RS256 + ES256). A
-Compact token carries only the `jwt_builder_setkey()` signer.
+signer, so signatures may use different algorithms (e.g. RS256 + ES256).
+`jwt_builder_setkey()` sets one signer of its own, always the first signature
+(a builder callback's key signs it, in every form); it never re-keys a
+`jwt_builder_add_signature()` signer, whatever the call order. A Compact token
+carries only the `jwt_builder_setkey()` signer.
 
 To verify a multi-signature token, supply a set of candidate keys (a JWKS) with
 `jwt_checker_setkeyring()` and a policy: `JWT_VERIFY_POLICY_ANY` (the default —
@@ -241,7 +244,9 @@ JWE content encryption ``enc`` | OpenSSL            | GnuTLS             | MbedT
 > [!NOTE]
 > ``ECDH-ES`` supports both Direct Key Agreement and the ``+A*KW`` key
 > wrapping modes, on the EC curves P-256/384/521 and the OKP curves
-> X25519/X448, with optional ``apu``/``apv`` PartyInfo. ``RSA1_5`` and
+> X25519/X448, with optional ``apu``/``apv`` PartyInfo. Direct Key
+> Agreement works with every ``enc``, including ``A192CBC-HS384`` and
+> ``A256CBC-HS512``. ``RSA1_5`` and
 > ``zip`` (compression) are intentionally not supported. Each backend
 > implements JWE natively. GnuTLS/Nettle cannot perform RSA-OAEP with SHA-1,
 > so the GnuTLS backend does not support plain ``RSA-OAEP`` (``RSA-OAEP-256``

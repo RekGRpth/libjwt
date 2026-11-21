@@ -13,8 +13,6 @@
  * absent, and the rest of the keyring keeps working. */
 
 #define ERR_KEY		"Key is in error and cannot be used"
-#define ERR_POLICY_1	"Signature policy not met (0 of 1 verified)"
-#define ERR_POLICY_2	"Signature policy not met (1 of 2 verified)"
 
 /* The members of tests/keys/ec_key_prime256v1.json ("ES256") and of
  * tests/keys/oct_key_256.json ("HS256"), which sign the tokens below. */
@@ -670,17 +668,21 @@ START_TEST(test_latch_boundary)
 }
 END_TEST
 
-/* A JSON null member is treated as absent, the same under both JSON backends:
- * "x5c":null and "alg":null must not put the key in error (Jansson used to
- * flag them, json-c read them as absent -- a divergence that an in-error key
- * never being used would turn into one backend refusing what the other uses).
- * The key loads clean and verifies on both. */
+/* A member whose value is JSON null is present, with a value of the wrong
+ * type, the same under both JSON backends: "x5c":null and "alg":null put the
+ * key in error (Jansson always did; json-c used to read them as absent), so
+ * it is refused alike, rather than one backend using what the other refuses. */
 START_TEST(test_json_null_members)
 {
-	static const char * const variants[] = {
-		"{" EC_PUB_NOALG ",\"x5c\":null}",
-		"{" EC_PUB_NOALG ",\"alg\":null}",
-		"{" EC_PUB_NOALG ",\"alg\":null,\"x5c\":null}",
+	static const struct {
+		const char *json;
+		const char *msg;
+	} variants[] = {
+		{ "{" EC_PUB_NOALG ",\"x5c\":null}",
+		  "Invalid JWK: \"x5c\" is not an array" },
+		{ "{" EC_PUB_NOALG ",\"alg\":null}", "Invalid alg type" },
+		{ "{" EC_PUB_NOALG ",\"alg\":null,\"x5c\":null}",
+		  "Invalid alg type" },
 	};
 	jwk_set_t *signer_set;
 	const jwk_item_t *signer;
@@ -694,7 +696,7 @@ START_TEST(test_json_null_members)
 	tok = sign_tok(JWT_ALG_ES256, signer, NULL, JWT_FORMAT_COMPACT);
 
 	for (n = 0; n < ARRAY_SIZE(variants); n++) {
-		jwk_set_t *set = jwks_create(variants[n]);
+		jwk_set_t *set = jwks_create(variants[n].json);
 		const jwk_item_t *key;
 		jwt_checker_auto_t *c = jwt_checker_new();
 
@@ -702,13 +704,15 @@ START_TEST(test_json_null_members)
 		ck_assert_int_eq(jwks_error(set), 0);
 		key = jwks_item_get(set, 0);
 		ck_assert_ptr_nonnull(key);
-		/* The same error state on both backends: not in error. */
-		ck_assert_int_eq(jwks_item_error(key), 0);
+		/* The same error state on both backends: in error. */
+		ck_assert_int_ne(jwks_item_error(key), 0);
+		ck_assert_str_eq(jwks_item_error_msg(key), variants[n].msg);
 
-		/* And the same verify result: the key is usable. */
+		/* And the same verify result: the key is refused. */
 		ck_assert_ptr_nonnull(c);
-		ck_assert_int_eq(jwt_checker_setkey(c, JWT_ALG_ES256, key), 0);
-		ck_assert_int_eq(jwt_checker_verify(c, tok), 0);
+		ck_assert_int_ne(jwt_checker_setkey(c, JWT_ALG_ES256, key), 0);
+		ck_assert_str_eq(jwt_checker_error_msg(c), ERR_KEY);
+		ck_assert_int_ne(jwt_checker_verify(c, tok), 0);
 
 		jwks_free(set);
 	}
@@ -810,7 +814,7 @@ START_TEST(test_callback_errored_json)
 			cb_key = jwks_item_get(vset, 0);
 			ck_assert_int_eq(jwt_checker_setcb(c, key_cb, NULL), 0);
 			ck_assert_int_ne(jwt_checker_verify(c, tok), 0);
-			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_KEY);
 			ck_assert_uint_eq(jwt_checker_sig_count(c), 1);
 			ck_assert_int_eq(jwt_checker_sig_verified(c, 0), 0);
 			ck_assert_ptr_null(jwt_checker_sig_key(c, 0));
@@ -833,7 +837,7 @@ START_TEST(test_callback_errored_json)
 			cb_alg = flagged[i].alg;
 			cb_key = jwks_item_get(vset, 0);
 			ck_assert_int_ne(jwt_checker_verify(c, tok), 0);
-			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_KEY);
 			ck_assert_ptr_null(jwt_checker_sig_key(c, 0));
 		}
 
@@ -883,18 +887,18 @@ START_TEST(test_keyring_errored_scan)
 			ck_assert_int_eq(jwt_checker_setkeyring(c, only,
 							both_pol[p]), 0);
 			ck_assert_int_ne(jwt_checker_verify(c, tok), 0);
-			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+			ck_assert_str_eq(jwt_checker_error_msg(c), "No keyring key can verify \"ES256\"");
 			ck_assert_ptr_null(jwt_checker_sig_key(c, 0));
 
 			ck_assert_int_eq(jwt_checker_setkeyring(c, all_bad,
 							both_pol[p]), 0);
 			ck_assert_int_ne(jwt_checker_verify(c, tok), 0);
-			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+			ck_assert_str_eq(jwt_checker_error_msg(c), "No keyring key can verify \"ES256\"");
 
 			ck_assert_int_eq(jwt_checker_setkeyring(c, x5t,
 							both_pol[p]), 0);
 			ck_assert_int_ne(jwt_checker_verify(c, tok), 0);
-			ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+			ck_assert_str_eq(jwt_checker_error_msg(c), "No keyring key can verify \"ES256\"");
 
 			ck_assert_int_eq(jwt_checker_setkeyring(c, mixed,
 							both_pol[p]), 0);
@@ -985,7 +989,7 @@ START_TEST(test_keyring_errored_kid)
 		cb_seen = signer;
 		cb_calls = 0;
 		ck_assert_int_ne(jwt_checker_verify(c, tok), 0);
-		ck_assert_str_eq(jwt_checker_error_msg(c), ERR_POLICY_1);
+		ck_assert_str_eq(jwt_checker_error_msg(c), "No signature key with \"kid\" \"k1\" in the keyring");
 		ck_assert_int_eq(cb_calls, 1);
 		ck_assert_ptr_null(cb_seen);
 		ck_assert_ptr_null(jwt_checker_sig_key(c, 0));
@@ -1039,7 +1043,9 @@ START_TEST(test_keyring_errored_policy)
 	ck_assert_int_eq(jwt_checker_setkeyring(c_all, ring,
 				JWT_VERIFY_POLICY_ALL), 0);
 	ck_assert_int_ne(jwt_checker_verify(c_all, tok), 0);
-	ck_assert_str_eq(jwt_checker_error_msg(c_all), ERR_POLICY_2);
+	ck_assert_str_eq(jwt_checker_error_msg(c_all), "Signature policy not met (1 of 2 verified); "
+		"signature 1: No signature key with \"kid\" \"oct\" "
+		"in the keyring");
 
 	jwks_free(ring);
 	jwks_free(oct_set);

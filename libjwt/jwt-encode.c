@@ -32,7 +32,7 @@ struct jwt_signature *jwt_signature_first(struct jwt_common *cmd)
 	return list_first_entry(&cmd->signatures, struct jwt_signature, node);
 }
 
-struct jwt_signature *jwt_signature_append(struct jwt_common *cmd)
+static struct jwt_signature *signature_new(struct jwt_common *cmd, int first)
 {
 	struct jwt_signature *s;
 
@@ -44,24 +44,24 @@ struct jwt_signature *jwt_signature_append(struct jwt_common *cmd)
 		return NULL; // LCOV_EXCL_LINE
 
 	memset(s, 0, sizeof(*s));
-	list_add_tail(&s->node, &cmd->signatures);
+	if (first)
+		list_add(&s->node, &cmd->signatures);
+	else
+		list_add_tail(&s->node, &cmd->signatures);
 	cmd->n_signatures++;
 
 	return s;
 }
 
-struct jwt_signature *jwt_signature_first_or_add(struct jwt_common *cmd)
+struct jwt_signature *jwt_signature_append(struct jwt_common *cmd)
 {
-	struct jwt_signature *s;
+	return signature_new(cmd, 0);
+}
 
-	if (cmd == NULL)
-		return NULL; // LCOV_EXCL_LINE
-
-	s = jwt_signature_first(cmd);
-	if (s != NULL)
-		return s;
-
-	return jwt_signature_append(cmd);
+/* The jwt_builder_setkey() signer goes first in the list. */
+struct jwt_signature *jwt_signature_prepend(struct jwt_common *cmd)
+{
+	return signature_new(cmd, 1);
 }
 
 /* Free one signature and the members it owns. Does not unlink it; the caller
@@ -101,7 +101,7 @@ static int signature_set_header(jwt_json_t **obj, const char *key,
 			return 1; // LCOV_EXCL_LINE
 	}
 
-	if (jwt_json_obj_get(*obj, key) != NULL)
+	if (jwt_json_obj_has(*obj, key))
 		return 1;
 
 	val = jwt_json_parse(value_json, JWT_JSON_DECODE_ANY, NULL);
@@ -140,11 +140,12 @@ int jwt_signature_add_header_json(jwt_signature_t *signature,
 
 /* @rfc{7515,7.2.1} A header parameter must not appear in both a signature's
  * protected and unprotected header. obj_foreach stops (returns non-zero) at the
- * first member of @header that is also present in @protected. */
+ * first member of @header that is also present in @protected, even as a JSON
+ * null (see jwt_json_obj_has()). */
 static int overlap_cb(const char *key, jwt_json_t *value, void *ctx)
 {
 	(void)value;
-	return jwt_json_obj_get((const jwt_json_t *)ctx, key) != NULL;
+	return jwt_json_obj_has((const jwt_json_t *)ctx, key);
 }
 
 int jwt_header_params_overlap(const jwt_json_t *protected,
@@ -204,7 +205,8 @@ static jwt_json_t *build_protected(jwt_t *jwt, struct jwt_signature *s,
 		return NULL; // LCOV_EXCL_LINE
 	}
 
-	if (jwt_json_obj_get(prot, "typ") == NULL) {
+	/* An application's "typ", a JSON null one too, is kept. */
+	if (!jwt_json_obj_has(prot, "typ")) {
 		v = jwt_json_create_str("JWT");
 		if (v == NULL || jwt_json_obj_set(prot, "typ", v)) {
 			jwt_json_release(prot); // LCOV_EXCL_LINE
@@ -289,10 +291,105 @@ static int sig_crit_check(jwt_t *jwt, const struct jwt_signature *s,
 	return 0;
 }
 
+/* Sign one signature @s with @alg/@key and add it to the output: an element
+ * of @sig_arr (General), or the top-level @out_obj (Flattened). @s supplies
+ * the per-signature headers. @payload is the shared payload part. */
+static int encode_one_sig(jwt_t *jwt, struct jwt_signature *s, jwt_alg_t alg,
+			  const jwk_item_t *key, const char *payload,
+			  size_t payload_len, jwt_json_t *out_obj,
+			  jwt_json_t *sig_arr)
+{
+	jwt_json_auto_t *prot = NULL;
+	char_auto *prot_b64 = NULL, *sig_b64 = NULL, *input = NULL;
+	char *buf = NULL, *rawsig = NULL;
+	unsigned int rawsig_len = 0;
+	size_t input_len;
+	int prot_len, enc;
+
+	/* "none" is not allowed in a JSON JWS. An add_signature() signer
+	 * always names its alg; FUNC(generate) resolved the setkey() signer's
+	 * from its key (e.g. setkey(NONE, key)), so none is left only when
+	 * there is no key at all. */
+	if (alg == JWT_ALG_NONE) {
+		jwt_write_error(jwt,
+			"A JSON-serialized JWS cannot use \"none\"");
+		return 1;
+	}
+
+	prot = build_protected(jwt, s, alg);
+	if (prot == NULL)
+		return 1; // LCOV_EXCL_LINE
+
+	if (sig_crit_check(jwt, s, prot))
+		return 1;
+
+	if (s->header && jwt_header_params_overlap(prot, s->header)) {
+		jwt_write_error(jwt,
+			"protected and unprotected headers overlap");
+		return 1;
+	}
+
+	if (write_js(prot, &buf))
+		return 1; // LCOV_EXCL_LINE
+	prot_len = jwt_base64uri_encode(&prot_b64, buf, (int)strlen(buf));
+	jwt_freemem(buf);
+	if (prot_len <= 0) {
+		jwt_write_error(jwt, "Error encoding protected header"); // LCOV_EXCL_LINE
+		return 1; // LCOV_EXCL_LINE
+	}
+	/* The return counts stripped '=' padding; use the true length. */
+	prot_len = (int)strlen(prot_b64);
+
+	/* @rfc{7797,3} Signing input: BASE64URL(protected) "." payload
+	 * (payload is base64url or raw per b64; binary-safe). */
+	input_len = (size_t)prot_len + 1 + payload_len;
+	input = jwt_malloc(input_len + 1);
+	if (input == NULL)
+		return 1; // LCOV_EXCL_LINE
+	memcpy(input, prot_b64, prot_len);
+	input[prot_len] = '.';
+	memcpy(input + prot_len + 1, payload, payload_len);
+	input[input_len] = '\0';
+
+	jwt->alg = alg;
+	jwt->key = key;
+	if (jwt_sign(jwt, &rawsig, &rawsig_len, input, input_len))
+		return 1;
+
+	enc = jwt_base64uri_encode(&sig_b64, rawsig, (int)rawsig_len);
+	jwt_freemem(rawsig);
+	if (enc <= 0) {
+		jwt_write_error(jwt, "Error encoding signature"); // LCOV_EXCL_LINE
+		return 1; // LCOV_EXCL_LINE
+	}
+
+	if (sig_arr != NULL) {
+		jwt_json_t *sig_obj = jwt_json_create();
+
+		if (sig_obj == NULL || jwt_json_arr_append(sig_arr, sig_obj))
+			return 1; // LCOV_EXCL_LINE
+		if (fill_sig_json(sig_obj, prot_b64, s->header, sig_b64))
+			return 1; // LCOV_EXCL_LINE
+	} else {
+		/* Flattened: hoist the single signature to top level. */
+		if (fill_sig_json(out_obj, prot_b64, s->header, sig_b64))
+			return 1; // LCOV_EXCL_LINE
+	}
+
+	return 0;
+}
+
 /* @rfc{7515,7.2} Emit the JWS JSON Serialization. @jwt carries the finalized
  * shared claims (the payload) and the shared base protected header; @cmd carries
  * the signature list and the format (Flattened or General). Each signature signs
- * over BASE64URL(its own protected header) || '.' || BASE64URL(payload). */
+ * over BASE64URL(its own protected header) || '.' || BASE64URL(payload).
+ *
+ * @jwt->alg/@jwt->key are the jwt_builder_setkey() signer's, as the builder
+ * callback left them (see FUNC(generate)). They make @cmd->setkey_sig's
+ * signature, as they make a Compact token's. Without that node (setkey() was
+ * not called, or was undone), a callback-supplied key still acts as the
+ * setkey() signer: its signature comes first, ahead of the add_signature()
+ * ones, which each keep their own alg/key. */
 char *jwt_encode_json(jwt_t *jwt, struct jwt_common *cmd)
 {
 	char_auto *payload = NULL;
@@ -301,6 +398,8 @@ char *jwt_encode_json(jwt_t *jwt, struct jwt_common *cmd)
 	struct jwt_signature *s;
 	jwt_json_auto_t *out_obj = NULL;
 	jwt_json_t *sig_arr = NULL, *v;
+	const jwt_alg_t p_alg = jwt->alg;
+	const jwk_item_t *p_key = jwt->key;
 
 	/* @rfc{7797} Shared payload (base64url or raw), encoded once. */
 	if (jwt_build_payload_part(jwt, &payload, &payload_len)) {
@@ -326,85 +425,24 @@ char *jwt_encode_json(jwt_t *jwt, struct jwt_common *cmd)
 			return NULL; // LCOV_EXCL_LINE
 	}
 
+	/* A callback key standing in for a setkey() signer there is none of.
+	 * It has no per-signature headers of its own. */
+	if (cmd->setkey_sig == NULL && p_key != NULL) {
+		struct jwt_signature cb_sig;
+
+		memset(&cb_sig, 0, sizeof(cb_sig));
+		if (encode_one_sig(jwt, &cb_sig, p_alg, p_key, payload,
+				   payload_len, out_obj, sig_arr))
+			return NULL;
+	}
+
 	list_for_each_entry(s, &cmd->signatures, node) {
-		jwt_json_auto_t *prot = NULL;
-		char_auto *prot_b64 = NULL, *sig_b64 = NULL, *input = NULL;
-		char *rawsig = NULL;
-		unsigned int rawsig_len = 0;
-		size_t input_len;
-		int prot_len, enc;
-		jwt_alg_t alg;
+		int mine = (s == cmd->setkey_sig);
 
-		/* Resolve the algorithm: explicit, else inferred from the key
-		 * (e.g. setkey(NONE, key)). "none" is not allowed in a JSON JWS. */
-		alg = (s->alg != JWT_ALG_NONE) ? s->alg
-			: (s->key ? s->key->alg : JWT_ALG_NONE);
-		if (alg == JWT_ALG_NONE) {
-			jwt_write_error(jwt,
-				"A JSON-serialized JWS cannot use \"none\"");
+		if (encode_one_sig(jwt, s, mine ? p_alg : s->alg,
+				   mine ? p_key : s->key, payload,
+				   payload_len, out_obj, sig_arr))
 			return NULL;
-		}
-
-		prot = build_protected(jwt, s, alg);
-		if (prot == NULL)
-			return NULL; // LCOV_EXCL_LINE
-
-		if (sig_crit_check(jwt, s, prot))
-			return NULL;
-
-		if (s->header && jwt_header_params_overlap(prot, s->header)) {
-			jwt_write_error(jwt,
-				"protected and unprotected headers overlap");
-			return NULL;
-		}
-
-		if (write_js(prot, &buf))
-			return NULL; // LCOV_EXCL_LINE
-		prot_len = jwt_base64uri_encode(&prot_b64, buf, (int)strlen(buf));
-		jwt_freemem(buf);
-		if (prot_len <= 0) {
-			jwt_write_error(jwt, "Error encoding protected header"); // LCOV_EXCL_LINE
-			return NULL; // LCOV_EXCL_LINE
-		}
-		/* The return counts stripped '=' padding; use the true length. */
-		prot_len = (int)strlen(prot_b64);
-
-		/* @rfc{7797,3} Signing input: BASE64URL(protected) "." payload
-		 * (payload is base64url or raw per b64; binary-safe). */
-		input_len = (size_t)prot_len + 1 + payload_len;
-		input = jwt_malloc(input_len + 1);
-		if (input == NULL)
-			return NULL; // LCOV_EXCL_LINE
-		memcpy(input, prot_b64, prot_len);
-		input[prot_len] = '.';
-		memcpy(input + prot_len + 1, payload, payload_len);
-		input[input_len] = '\0';
-
-		jwt->alg = alg;
-		jwt->key = s->key;
-		if (jwt_sign(jwt, &rawsig, &rawsig_len, input, input_len))
-			return NULL;
-
-		enc = jwt_base64uri_encode(&sig_b64, rawsig, (int)rawsig_len);
-		jwt_freemem(rawsig);
-		if (enc <= 0) {
-			jwt_write_error(jwt, "Error encoding signature"); // LCOV_EXCL_LINE
-			return NULL; // LCOV_EXCL_LINE
-		}
-
-		if (cmd->format == JWT_FORMAT_JSON_GENERAL) {
-			jwt_json_t *sig_obj = jwt_json_create();
-
-			if (sig_obj == NULL || jwt_json_arr_append(sig_arr,
-								   sig_obj))
-				return NULL; // LCOV_EXCL_LINE
-			if (fill_sig_json(sig_obj, prot_b64, s->header, sig_b64))
-				return NULL; // LCOV_EXCL_LINE
-		} else {
-			/* Flattened: hoist the single signature to top level. */
-			if (fill_sig_json(out_obj, prot_b64, s->header, sig_b64))
-				return NULL; // LCOV_EXCL_LINE
-		}
 	}
 
 	buf = jwt_json_serialize(out_obj, JWT_JSON_COMPACT);
@@ -482,7 +520,8 @@ static int jwt_validate_crit(jwt_t *jwt, const jwt_json_t *hdr,
 			return 1;
 		}
 
-		if (jwt_json_obj_get(hdr, name) == NULL) {
+		/* A member whose value is JSON null is in the header. */
+		if (!jwt_json_obj_has(hdr, name)) {
 			jwt_write_error(jwt,
 				"\"crit\" lists \"%s\" which is not in the header",
 				name);

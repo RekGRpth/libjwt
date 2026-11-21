@@ -141,6 +141,24 @@ static int process_one(jwt_checker_t *checker, int signed_only,
 	return err;
 }
 
+/* read_line() looks at every byte of a line so that a NUL byte, or a line
+ * that does not fit, fails the whole line (GHSA-g7xw-4cjw-2247). Reading one
+ * byte at a time with fgetc() takes the stdin lock once per byte, which on
+ * macOS is most of the run time on bulk input (#373). getc_unlocked() inside
+ * a single flockfile()/funlockfile() region takes the lock once per line and
+ * reads the exact same bytes. These three names are POSIX; mingw-w64 declares
+ * none of them, so the plain fgetc() loop (which locks per byte there) is kept
+ * for _WIN32 -- the Windows build is not the one with the stdin-lock cost. */
+#ifdef _WIN32
+#define stdin_lock()	((void)0)
+#define stdin_getc()	fgetc(stdin)
+#define stdin_unlock()	((void)0)
+#else
+#define stdin_lock()	flockfile(stdin)
+#define stdin_getc()	getc_unlocked(stdin)
+#define stdin_unlock()	funlockfile(stdin)
+#endif
+
 /* Read one line of stdin into @buf, without its newline. Returns 1 for a
  * line (the last one needs no newline), 0 at the end of the input or on a
  * read error, and -1 for a line that does not fit in @buf or has a NUL byte
@@ -152,12 +170,15 @@ static int read_line(char *buf, size_t size)
 	size_t len = 0;
 	int c, ret = 1;
 
-	while ((c = fgetc(stdin)) != EOF && c != '\n') {
+	/* One lock for the whole line, not one per byte. */
+	stdin_lock();
+	while ((c = stdin_getc()) != EOF && c != '\n') {
 		if (c == '\0' || len + 1 >= size)
 			ret = -1;
 		else
 			buf[len++] = (char)c;
 	}
+	stdin_unlock();
 
 	/* The end of the input, or a read error: a line cut short by one is
 	 * not a token either. */
@@ -218,7 +239,7 @@ int main(int argc, char *argv[])
 	int oc, err, verbose = 0;
 	int quiet = 0;
 	int signed_only;
-	int want_help = 0, want_list = 0;
+	int want_help = 0, want_list = 0, nopts = 0;
 
 	char *optstr = "hk:r:P:a:lvqp:";
 	struct option opttbl[] = {
@@ -235,6 +256,7 @@ int main(int argc, char *argv[])
 	};
 
 	while ((oc = getopt_long(argc, argv, optstr, opttbl, NULL)) != -1) {
+		nopts++;
 		switch (oc) {
 		case 'h':
 			want_help = 1;
@@ -284,7 +306,7 @@ int main(int argc, char *argv[])
 			if (alg >= JWT_ALG_INVAL) {
 				fprintf(stderr, "Unknown algorithm [%s]\nUse "
 					"-l to see a list of supported "
-					"algorithms)\n", optarg);
+					"algorithms\n", optarg);
 				exit(EXIT_FAILURE);
 			}
 			alg_given = 1;
@@ -296,12 +318,15 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	/* -h/-l print and exit 0 only when they are the sole argument. Given
-	 * with a token (or a key, or any other option) they would otherwise
-	 * exit 0 while the tokens went unverified (GHSA-g7xw-4cjw-2247), so
-	 * that is now a usage error. A later bad option still fails first. */
+	/* -h/-l print and exit 0 only when they are the sole argument and the
+	 * only option in it. Given with a token (or a key, or any other option)
+	 * they would otherwise exit 0 while the tokens went unverified
+	 * (GHSA-g7xw-4cjw-2247), so that is now a usage error. argc != 2 catches
+	 * a separate argument (a token, or -h -v); nopts != 1 catches options
+	 * clustered into the one argument (getopt reads -hv as -h -v), which
+	 * leave argc at 2. A later bad option still fails first. */
 	if (want_help || want_list) {
-		if (argc != 2)
+		if (argc != 2 || nopts != 1)
 			usage("--help and --list take no other arguments",
 			      EXIT_FAILURE);
 		if (want_help)
